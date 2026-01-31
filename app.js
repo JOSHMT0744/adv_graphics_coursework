@@ -104,8 +104,9 @@ function applySkyParams() {
 }
 
 // Generate far hill terrain
-const farHill = generateTerrain(50, 50, 64, { endHeight: 20 });
-farHill.position.set(0, -30, -20);
+const farHill = generateTerrain(200, 50, 64, { endHeight: 55 });
+farHill.position.set(0, -55, -80);
+farHill.rotateZ(Math.PI);
 scene.add(farHill);
 
 // Bezier surface: 4×4 control points, row-major index i*4+j. Hump: inner 2×2 at y=2, rest y=0; x,z grid (i-1.5)*2, (j-1.5)*2
@@ -230,7 +231,7 @@ const treeElement = createOakTree(0, 0);
 scene.add(treeElement);
 
 // Create people elements (rebuildPeople updates count from peopleParams.count)
-const peopleParams = { count: 100 };
+const peopleParams = { count: 20 };
 let peopleElements = [];
 let withPhoneCache = [];
 

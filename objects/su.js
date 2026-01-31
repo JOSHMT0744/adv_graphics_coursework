@@ -303,8 +303,6 @@ export function createDunelmHouse(x = 0, z = 0, scale = 1, options = {}) {
         windowMaterials = {
             front: createPlanarReflectionMaterial(pr.front.renderTarget.texture, 'front'),
             back:  createPlanarReflectionMaterial(pr.back.renderTarget.texture,  'back'),
-            left:  createPlanarReflectionMaterial(pr.left.renderTarget.texture,  'left'),
-            right: createPlanarReflectionMaterial(pr.right.renderTarget.texture, 'right')
         };
     } else if (options.envMapFront != null && options.envMapBack != null) {
         wmat = mat(options.envMapFront);
