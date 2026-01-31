@@ -1,5 +1,5 @@
-import * as THREE from "https://unpkg.com/three@0.126.1/build/three.module.js";
-import { TransformControls } from "https://unpkg.com/three@0.126.1/examples/jsm/controls/TransformControls.js";
+import * as THREE from "three";
+import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { ParametricCurve } from "./ParametricCurve.js";
 
 /**

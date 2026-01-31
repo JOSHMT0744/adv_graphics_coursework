@@ -1,4 +1,4 @@
-import * as THREE from "https://unpkg.com/three@0.126.1/build/three.module.js";
+import * as THREE from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 
 // Shared flash materials: 80 phones use 2 materials instead of 80, reducing state churn.
@@ -72,7 +72,7 @@ class Phone extends THREE.Group {
         this._flashMesh.material = sharedFlashMatOn;
         if (this._flashLight) {
             if (!this.children.includes(this._flashLight)) this.add(this._flashLight);
-            this._flashLight.intensity = 2;
+            this._flashLight.intensity = 1;
         }
     }
 

@@ -1,5 +1,5 @@
 // https://tympanus.net/codrops/2021/10/04/creating-3d-characters-in-three-js/
-import * as THREE from  "https://unpkg.com/three@0.126.1/build/three.module.js";    
+import * as THREE from "three";    
 import { createPhone } from './phone.js';
 
 export class Figure {

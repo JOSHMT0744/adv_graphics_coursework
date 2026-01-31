@@ -1,52 +1,52 @@
-import * as THREE from "https://unpkg.com/three@0.126.1/build/three.module.js";
+import * as THREE from "three";
 
 const textureLoader = new THREE.TextureLoader();
 
 /**
- * Create a procedural cube env map for window reflections (avoids extra render passes).
- * +Y = sky-like, -Y = ground (not black so reflections stay visible), lateral = mid gray.
+ * Create a procedural cube env map for window reflections (no CubeCamera / extra renders).
+ * Night-themed: +Y = dark blue/purple sky, -Y = dark ground, lateral = dark gray.
  * @returns {THREE.CubeTexture}
  */
 function createDefaultEnvMap() {
     const size = 16;
     const canvases = [];
     const hexToStyle = (h) => '#' + h.toString(16).padStart(6, '0');
-    // +X, -X: mid gray
+    // +X, -X: dark gray
     for (let i = 0; i < 2; i++) {
         const c = document.createElement('canvas');
         c.width = size; c.height = size;
         const ctx = c.getContext('2d');
-        ctx.fillStyle = hexToStyle(0x888888);
+        ctx.fillStyle = hexToStyle(0x2a2a35);
         ctx.fillRect(0, 0, size, size);
         canvases.push(c);
     }
-    // +Y (sky): light blue
+    // +Y (sky): dark blue/purple gradient (night)
     (function () {
         const c = document.createElement('canvas');
         c.width = size; c.height = size;
         const ctx = c.getContext('2d');
         const g = ctx.createLinearGradient(0, size, 0, 0);
-        g.addColorStop(0, hexToStyle(0x88aacc));
-        g.addColorStop(1, hexToStyle(0xcce5ff));
+        g.addColorStop(0, hexToStyle(0x1a1a28));
+        g.addColorStop(1, hexToStyle(0x2a2544));
         ctx.fillStyle = g;
         ctx.fillRect(0, 0, size, size);
         canvases.push(c);
     })();
-    // -Y (ground): gray-blue, not black, so reflected ground doesn't kill the windows
+    // -Y (ground): dark gray-blue
     (function () {
         const c = document.createElement('canvas');
         c.width = size; c.height = size;
         const ctx = c.getContext('2d');
-        ctx.fillStyle = hexToStyle(0x445566);
+        ctx.fillStyle = hexToStyle(0x1e2228);
         ctx.fillRect(0, 0, size, size);
         canvases.push(c);
     })();
-    // +Z, -Z: mid gray
+    // +Z, -Z: dark gray
     for (let i = 0; i < 2; i++) {
         const c = document.createElement('canvas');
         c.width = size; c.height = size;
         const ctx = c.getContext('2d');
-        ctx.fillStyle = hexToStyle(0x888888);
+        ctx.fillStyle = hexToStyle(0x2a2a35);
         ctx.fillRect(0, 0, size, size);
         canvases.push(c);
     }
@@ -67,6 +67,51 @@ function getDefaultWindowMat() {
         });
     }
     return _defaultWindowMat;
+}
+
+/**
+ * Planar reflection shader: samples texture with UV from reflection camera projection.
+ * textureMatrix = (0.5 scale/offset) * reflectionCamera.projectionMatrix * reflectionCamera.matrixWorldInverse.
+ * Vertex: vUv = textureMatrix * modelMatrix * vec4(position, 1).
+ */
+const PLANAR_REFLECTION_VERTEX = `
+    uniform mat4 textureMatrix;
+    varying vec4 vUv;
+    void main() {
+        vUv = textureMatrix * modelMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+`;
+const PLANAR_REFLECTION_FRAGMENT = `
+    uniform vec3 color;
+    uniform sampler2D tDiffuse;
+    varying vec4 vUv;
+    void main() {
+        vec4 base = texture2DProj(tDiffuse, vUv);
+        gl_FragColor = vec4(mix(base.rgb, color, 0.15), 1.0);
+    }
+`;
+
+/**
+ * Create a material for planar reflection (one per face). Caller must set material.uniforms.textureMatrix
+ * each frame from the reflection camera's projectionMatrix * matrixWorldInverse (with 0.5 scale/offset).
+ * @param {THREE.Texture} texture - reflection render target texture
+ * @param {string} face - 'front'|'back' (stored in userData for app.js to update matrix)
+ * @returns {THREE.ShaderMaterial}
+ */
+function createPlanarReflectionMaterial(texture, face) {
+    const mat = new THREE.ShaderMaterial({
+        uniforms: {
+            tDiffuse: { value: texture },
+            textureMatrix: { value: new THREE.Matrix4() },
+            color: { value: new THREE.Color(0x444860) }
+        },
+        vertexShader: PLANAR_REFLECTION_VERTEX,
+        fragmentShader: PLANAR_REFLECTION_FRAGMENT,
+        side: THREE.DoubleSide
+    });
+    mat.userData.planarReflectionFace = face;
+    return mat;
 }
 const concreteTexture = textureLoader.load('textures/concrete_ground_01_2k/concrete_ground_01_color_2k.png',
     function (texture) {
@@ -93,7 +138,7 @@ const WINDOW_FACE_OFFSET = 0.002;
  * Uses envMap-based reflective material (no extra render passes).
  * Windows are offset slightly outward from the face to avoid being occluded by the block.
  * @param {THREE.Group} parentGroup - Block group to add windows to.
- * @param {string} face - 'front'|'back'|'left'|'right'
+ * @param {string} face - 'front'|'back'
  * @param {number} blockW - block width (X)
  * @param {number} blockH - block height (Y)
  * @param {number} blockD - block depth (Z)
@@ -111,10 +156,6 @@ function addWindowGrid(parentGroup, face, blockW, blockH, blockD, countX, countY
             sizeW = blockW; sizeH = blockH; centre = new THREE.Vector3(0, 0, -d2); normal = new THREE.Vector3(0, 0, -1); rotY = Math.PI; break;
         case 'back':
             sizeW = blockW; sizeH = blockH; centre = new THREE.Vector3(0, 0, d2);  normal = new THREE.Vector3(0, 0, 1);  rotY = 0; break;
-        case 'left':   // -X
-            sizeW = blockD; sizeH = blockH; centre = new THREE.Vector3(-w2, 0, 0); normal = new THREE.Vector3(-1, 0, 0); rotY = Math.PI / 2; break;
-        case 'right':
-            sizeW = blockD; sizeH = blockH; centre = new THREE.Vector3(w2, 0, 0);  normal = new THREE.Vector3(1, 0, 0);  rotY = -Math.PI / 2; break;
         default: return;
     }
 
@@ -142,25 +183,25 @@ function addWindowGrid(parentGroup, face, blockW, blockH, blockD, countX, countY
 }
 
 /**
- * Create a block (box) with window grids on all four lateral faces.
+ * Create a block (box) with window grids on front and back faces only.
  * @param {number} w - width (X)
  * @param {number} h - height (Y)
  * @param {number} d - depth (Z)
- * @param {Object} windowCounts - { front:[cx,cy], back:[cx,cy], left:[cx,cy], right:[cx,cy] }
- * @param {THREE.Material} [windowMaterial] - material for front/left (or all if no back)
- * @param {THREE.Material} [windowMaterialBack] - material for back/right when using two env cubes
+ * @param {Object} windowCounts - { front:[cx,cy], back:[cx,cy] }
+ * @param {THREE.Material|{front,back}} [windowMaterial] - material for front, or object with front/back materials
+ * @param {THREE.Material} [windowMaterialBack] - material for back when using two materials (ignored if windowMaterial is object)
  * @returns {THREE.Group}
  */
 function createBlock(w, h, d, windowCounts = {}, windowMaterial = getDefaultWindowMat(), windowMaterialBack) {
-    const wBack = windowMaterialBack != null ? windowMaterialBack : windowMaterial;
+    const perFace = windowMaterial && typeof windowMaterial === 'object' && windowMaterial.front != null;
+    const wFront = perFace ? windowMaterial.front : windowMaterial;
+    const wBack = perFace ? windowMaterial.back : (windowMaterialBack != null ? windowMaterialBack : windowMaterial);
     const g = new THREE.Group();
     const box = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), concreteMat);
     g.add(box);
-    const minWindows = [2, 2]; // minimum number of windows on a block in x and y direction
-    addWindowGrid(g, 'front', w, h, d, (windowCounts.front || minWindows)[0], (windowCounts.front || minWindows)[1], RECESS, windowMaterial);
+    const minWindows = [2, 2];
+    addWindowGrid(g, 'front', w, h, d, (windowCounts.front || minWindows)[0], (windowCounts.front || minWindows)[1], RECESS, wFront);
     addWindowGrid(g, 'back',  w, h, d, (windowCounts.back || minWindows)[0],  (windowCounts.back || minWindows)[1],  RECESS, wBack);
-    addWindowGrid(g, 'left',  w, h, d, (windowCounts.left || minWindows)[0],  (windowCounts.left || minWindows)[1],  RECESS, windowMaterial);
-    addWindowGrid(g, 'right', w, h, d, (windowCounts.right || minWindows)[0], (windowCounts.right || minWindows)[1], RECESS, wBack);
     return g;
 }
 
@@ -248,14 +289,24 @@ function createSlantedRoof(w, d, slantAngle, blockTop) {
  * @param {number} x - world X position
  * @param {number} z - world Z position
  * @param {number} scale - uniform scale (default 1)
- * @param {Object} [options] - { envMap?:, envMapFront?:, envMapBack?: } envMap = both; or Front (front/left) + Back (back/right) for correct per-side reflections
+ * @param {Object} [options] - { envMap?, envMapFront?, envMapBack? } or { planarReflections: { front: { renderTarget, camera }, back } }
  * @returns {THREE.Group}
  */
 export function createDunelmHouse(x = 0, z = 0, scale = 1, options = {}) {
     const dunelm = new THREE.Group();
     const mat = (env) => new THREE.MeshStandardMaterial({ color: 0x444860, metalness: 0.9, roughness: 0.12, envMap: env, envMapIntensity: 1.8 });
+    let windowMaterials;
     let wmat, wmatBack;
-    if (options.envMapFront != null && options.envMapBack != null) {
+
+    if (options.planarReflections != null) {
+        const pr = options.planarReflections;
+        windowMaterials = {
+            front: createPlanarReflectionMaterial(pr.front.renderTarget.texture, 'front'),
+            back:  createPlanarReflectionMaterial(pr.back.renderTarget.texture,  'back'),
+            left:  createPlanarReflectionMaterial(pr.left.renderTarget.texture,  'left'),
+            right: createPlanarReflectionMaterial(pr.right.renderTarget.texture, 'right')
+        };
+    } else if (options.envMapFront != null && options.envMapBack != null) {
         wmat = mat(options.envMapFront);
         wmatBack = mat(options.envMapBack);
     } else if (options.envMap != null) {
@@ -266,8 +317,11 @@ export function createDunelmHouse(x = 0, z = 0, scale = 1, options = {}) {
         wmatBack = null;
     }
 
+    const blockMat = windowMaterials != null ? windowMaterials : wmat;
+    const blockMatBack = windowMaterials != null ? null : wmatBack;
+
     // blockLeft: tall tower (2.5, 6, 2.5) at (-3.5, 3, 2)
-    const blockLeft = createBlock(2.5, 6, 2.5, { front: [2, 4], back: [2, 3], left: [2, 4], right: [2, 4] }, wmat, wmatBack);
+    const blockLeft = createBlock(2.5, 6, 2.5, { front: [2, 4], back: [2, 3] }, blockMat, blockMatBack);
     blockLeft.position.set(-3.5, 3, 2);
     const fl = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.5, 0.02), concreteMat);
     fl.position.set(0, 0, -2.5 / 2 - 0.02);
@@ -275,7 +329,7 @@ export function createDunelmHouse(x = 0, z = 0, scale = 1, options = {}) {
     dunelm.add(blockLeft);
 
     // blockMain: (5, 4, 4) at (-0.5, 2, 0)
-    const blockMain = createBlock(5, 4, 4, { front: [4, 3], back: [3, 2], left: [2, 3], right: [2, 3] }, wmat, wmatBack);
+    const blockMain = createBlock(5, 4, 4, { front: [4, 3], back: [3, 2] }, blockMat, blockMatBack);
     blockMain.position.set(-0.5, 2, 0);
     [-0.5, 0.5].forEach((ox) => {
         const f = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.2, 0.02), concreteMat);
@@ -285,14 +339,14 @@ export function createDunelmHouse(x = 0, z = 0, scale = 1, options = {}) {
     dunelm.add(blockMain);
 
     // blockCantilever: (4, 2.5, 3) at (0, 0.8, -2), slanted roof
-    const blockCantilever = createBlock(4, 2.5, 3, { front: [3, 2], back: [2, 2], left: [2, 2], right: [2, 2] }, wmat, wmatBack);
+    const blockCantilever = createBlock(4, 2.5, 3, { front: [3, 2], back: [2, 2], left: [2, 2], right: [2, 2] }, blockMat, blockMatBack);
     blockCantilever.position.set(0, 0.8, -2);
     const cantileverRoof = createSlantedRoof(4, 3, 0.25, 2.5 / 2);
     blockCantilever.add(cantileverRoof);
     dunelm.add(blockCantilever);
 
     // blockRight: (3, 3.5, 3) at (3.5, 1.5, -0.5)
-    const blockRight = createBlock(3, 3.5, 3, { front: [2, 3], back: [2, 2], left: [2, 3], right: [2, 2] }, wmat, wmatBack);
+    const blockRight = createBlock(3, 3.5, 3, { front: [2, 3], back: [2, 2] }, blockMat, blockMatBack);
     blockRight.position.set(3.5, 1.5, -0.5);
     dunelm.add(blockRight);
 

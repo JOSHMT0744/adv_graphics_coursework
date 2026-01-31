@@ -10,7 +10,7 @@
  * @param {number} [params.scale=10000]
  * @returns {THREE.Mesh} Sky mesh (BoxGeometry + ShaderMaterial, BackSide, depthWrite: false)
  */
-import { Sky } from 'https://unpkg.com/three@0.126.1/examples/jsm/objects/Sky.js';
+import { Sky } from "three/examples/jsm/objects/Sky.js";
 
 export function createNightSky(params = {}) {
     const turbidity = params.turbidity ?? 0.8;
