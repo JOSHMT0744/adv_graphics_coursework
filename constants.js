@@ -1,7 +1,4 @@
 export const COLORS = {
-    OAK_BROWN: 0x8B4513,
     LEAF_GREEN: 0x2E8B57,
-    GRASS_LIGHT: 0x90EE90,
-    GRASS_DARK: 0x228B22,
     WATER: 0x0077BE,
 };
