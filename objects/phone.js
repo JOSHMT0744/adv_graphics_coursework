@@ -60,7 +60,7 @@ class Phone extends THREE.Group {
         // add in setFlashOn, remove in setFlashOff, so it is only in the scene while flashing.
         this._flashLight = null;
         if (flashLight) {
-            const light = new THREE.PointLight(0xffffdd, 0, 5, 2);
+            const light = new THREE.PointLight(0xffffdd, 0, 0, 20);
             light.position.set(width / 4, height / 2 - 0.08, -depth / 2 - 0.01);
             this._flashLight = light;
         }

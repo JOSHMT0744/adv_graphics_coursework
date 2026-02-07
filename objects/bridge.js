@@ -56,7 +56,7 @@ const BRIDGE_DEFAULTS = {
     prongCrossZ: 0.5,
     railingHeight: 0.9,
     railingWidth: 0.18,
-    lightSpacing: 2.0,
+    lightSpacing: 5.0,  // distance between lights along the bridge (larger = fewer lights)
     lightIntensity: 1.0,
     lightDistance: 6,
     lightColor: 0xfff5e6,

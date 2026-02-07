@@ -324,6 +324,46 @@ export function createDunelmHouse(x = 0, z = 0, scale = 1, options = {}) {
     const fl = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.5, 0.02), concreteMat);
     fl.position.set(0, 0, -2.5 / 2 - 0.02);
     blockLeft.add(fl);
+
+    // Door on left (-X) face of tall block: openable group (panel + cube handle) and black entry plane
+    const doorHeight = 1.2;
+    const doorWidth = 0.6;
+    const doorThickness = 0.04;
+    const doorCenterY = -3 + doorHeight / 2; // -2.4
+    const hingeX = -2.5 / 2 - 0.02; // -1.25 - 0.02
+    const doorCenterZ = 0;          // centered on left face (Z from -1.25 to 1.25)
+    // Hinge at back edge of door so panel extends from doorCenterZ - doorWidth/2 to doorCenterZ + doorWidth/2
+    const hingeZ = doorCenterZ + doorWidth / 2; // 0.3 (back edge of centered door)
+    const doorGroup = new THREE.Group();
+    doorGroup.position.set(hingeX, doorCenterY, hingeZ);
+    const doorPanel = new THREE.Mesh(
+        new THREE.BoxGeometry(doorThickness, doorHeight, doorWidth),
+        concreteMat
+    );
+    doorPanel.position.set(doorThickness / 2, 0, -doorWidth / 2); // hinge at group origin (front-left)
+    doorGroup.add(doorPanel);
+    const handleSize = 0.04;
+    const doorHandle = new THREE.Mesh(
+        new THREE.BoxGeometry(handleSize, handleSize, handleSize),
+        railingMat
+    );
+    doorHandle.position.set(-doorThickness / 2 - handleSize / 2, 0, -doorWidth / 2 - 0.05); // on -X face, near free edge
+    doorGroup.add(doorHandle);
+    doorGroup.userData.isOpen = false;
+    doorGroup.userData.open = function (angle) {
+        doorGroup.rotation.y = angle;
+        doorGroup.userData.isOpen = angle !== 0;
+    };
+    blockLeft.add(doorGroup);
+
+    const entryPlane = new THREE.Mesh(
+        new THREE.PlaneGeometry(doorWidth, doorHeight),
+        new THREE.MeshBasicMaterial({ color: 0x000000 })
+    );
+    entryPlane.position.set(-2.5 / 2 + 0.01, doorCenterY, doorCenterZ); // slightly inside opening, centered on left face
+    entryPlane.rotation.y = -Math.PI / 2; // normal +X (facing out)
+    blockLeft.add(entryPlane);
+
     dunelm.add(blockLeft);
 
     // blockMain: (5, 4, 4) at (-0.5, 2, 0)
@@ -402,5 +442,6 @@ export function createDunelmHouse(x = 0, z = 0, scale = 1, options = {}) {
 
     dunelm.position.set(x, 0, z);
     dunelm.scale.setScalar(scale);
+    dunelm.userData.radius = 3 * scale;
     return dunelm;
 }

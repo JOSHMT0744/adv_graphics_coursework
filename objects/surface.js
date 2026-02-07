@@ -32,7 +32,7 @@ function bernstein(i, t) {
  * @param {THREE.Vector3[]|{x:number,y:number,z:number}[]} controlPoints
  * @returns {THREE.Vector3}
  */
-function evalBezierSurface(u, v, controlPoints) {
+export function evalBezierSurface(u, v, controlPoints) {
     const point = new THREE.Vector3(0, 0, 0);
 
     for (let i = 0; i < 4; i++) { // u direction
