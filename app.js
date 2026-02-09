@@ -17,7 +17,7 @@ import { createBSplineSurface, createDraggableBSplineSurface, updateBSplineSurfa
 import { getTexture } from './utils/getTexture.js';
 import { Octree, createOctreeDebugLines } from './utils/Octree.js';
 import { createDragonfly, getDragonflyGeometry, getDragonflyGeometryLOD, getDragonflyMaterial } from './objects/dragonfly.js';
-import { createNavigationGrid, findPath } from './utils/astar.js';
+import { findPathOctree } from './utils/astar.js';
 import {
     createBezierSampler,
     createBSplineSampler,
@@ -919,6 +919,10 @@ const _dfWanderCentre = new THREE.Vector3();
 const _dfWanderDisplacement = new THREE.Vector3();
 const _dfSep = new THREE.Vector3();
 const _dfAvoid = new THREE.Vector3();
+const _dfFlockBox = new THREE.Box3();
+const _dfFlockBoxSize = new THREE.Vector3(1, 1, 1); // forceRadius 0.5 => query box 2*radius per axis
+const _dfFlockNeighbors = [];
+const _dfSeenIds = new Set(); // dedupe octree results (entity can be in multiple cells)
 const WANDER_CIRCLE_RADIUS = 0.8;
 const WANDER_JITTER = 0.15;
 const WANDER_OFFSET_DIST = 1.2;
@@ -995,6 +999,17 @@ const _listDfClose = [];
 const _listDfFar = [];
 const DRAGONFLY_LOD_CLOSE = 40;
 const DRAGONFLY_CULL_DISTANCE = 80;
+const DRAGONFLY_MIN_Y = -20;
+const DRAGONFLY_MAX_Y = 20;
+
+// Octree for dragonfly spatial queries (O(k) separation instead of O(n) per dragonfly)
+const dragonflyOctreeBounds = new THREE.Box3(
+    new THREE.Vector3(WALKABLE_WORLD_BOUNDS.min.x, DRAGONFLY_MIN_Y, WALKABLE_WORLD_BOUNDS.min.z),
+    new THREE.Vector3(WALKABLE_WORLD_BOUNDS.max.x, DRAGONFLY_MAX_Y, WALKABLE_WORLD_BOUNDS.max.z)
+);
+const dragonflyOctree = new Octree(dragonflyOctreeBounds, { maxDepth: 4, minSize: 2 });
+
+let _dragonflyIdCounter = 0;
 
 function updateDragonflies() {
     const targetCount = Math.min(Math.max(0, Math.floor(PARAMS.dragonflies.count)), DRAGONFLY_MAX);
@@ -1005,55 +1020,30 @@ function updateDragonflies() {
             const x = bounds.min.x + Math.random() * (bounds.max.x - bounds.min.x);
             const z = bounds.min.z + Math.random() * (bounds.max.z - bounds.min.z);
             const y = 2 + Math.random() * 8;
-            dragonflies.push(createDragonfly({ position: new THREE.Vector3(x, y, z) }));
+            const dragonfly = createDragonfly({ position: new THREE.Vector3(x, y, z), id: _dragonflyIdCounter++ });
+            dragonfly.bounds.min.set(dragonfly.pos.x - dragonfly.forceRadius, dragonfly.pos.y - dragonfly.forceRadius, dragonfly.pos.z - dragonfly.forceRadius);
+            dragonfly.bounds.max.set(dragonfly.pos.x + dragonfly.forceRadius, dragonfly.pos.y + dragonfly.forceRadius, dragonfly.pos.z + dragonfly.forceRadius);
+            dragonflies.push(dragonfly);
+            dragonflyOctree.insert(dragonfly);
         }
     } else if (delta < 0) {
+        for (let i = targetCount; i < dragonflies.length; i++) {
+            dragonflyOctree.remove(dragonflies[i]);
+        }
         dragonflies.length = targetCount;
     }
 }
 
 updateDragonflies();
 
-// Dragonfly flight bounds (Y range for flying)
-const DRAGONFLY_MIN_Y = 0;
-const DRAGONFLY_MAX_Y = 15;
-
-function getDragonflyNavGrid() {
-    const bounds = {
-        minX: WALKABLE_WORLD_BOUNDS.min.x,
-        maxX: WALKABLE_WORLD_BOUNDS.max.x,
-        minY: DRAGONFLY_MIN_Y,
-        maxY: DRAGONFLY_MAX_Y,
-        minZ: WALKABLE_WORLD_BOUNDS.min.z,
-        maxZ: WALKABLE_WORLD_BOUNDS.max.z
-    };
-    // Block cells that sit below (or inside) ground/walkable surfaces
-    const isBlocked = (x, y, z) => {
-        const info = walkableSampler.getSurfaceInfo(x, z);
-        if (info.inside && info.y != null && y <= info.y + 0.5) return true;
-        return false;
-    };
-    // Spherical obstacles (buildings/lilies extruded into 3D)
-    const dunelmY = dunelm.position.y || 0;
-    const sphereObstacles = [
-        { x: dunelm.position.x, y: dunelmY, z: dunelm.position.z, radius: dunelm.userData.radius }
-    ];
-    for (let i = 0; i < lilies.length; i++) {
-        sphereObstacles.push({
-            x: lilies[i].x,
-            y: lilies[i].y,
-            z: lilies[i].z,
-            radius: LILY_AVOID_RADIUS
-        });
-    }
-    return createNavigationGrid(bounds, 2, isBlocked, sphereObstacles);
-}
+const _astarLeafCenter = new THREE.Vector3();
 
 let cameraFrustum = new THREE.Frustum();
 let frustumMatrix = new THREE.Matrix4();
 
 let frameCount = 0;
 let octreeDebugLine = null;
+let dragonflyOctreeDebugLine = null;
 const animationClock = new THREE.Clock();
 
 function applyWalkCycle(skinnedMesh, entity, time) {
@@ -1091,6 +1081,19 @@ function updateOctreeDebugLine() {
     const boxes = cells.length > 0 ? cells : [octree.worldBounds.clone()];
     octreeDebugLine = createOctreeDebugLines(boxes);
     if (octreeDebugLine) scene.add(octreeDebugLine);
+}
+
+function updateDragonflyOctreeDebugLine() {
+    if (dragonflyOctreeDebugLine) {
+        scene.remove(dragonflyOctreeDebugLine);
+        dragonflyOctreeDebugLine.geometry.dispose();
+        dragonflyOctreeDebugLine.material.dispose();
+        dragonflyOctreeDebugLine = null;
+    }
+    const cells = dragonflyOctree.getCells();
+    const boxes = cells.length > 0 ? cells : [dragonflyOctree.worldBounds.clone()];
+    dragonflyOctreeDebugLine = createOctreeDebugLines(boxes, { color: 0xffaa00 });
+    if (dragonflyOctreeDebugLine) scene.add(dragonflyOctreeDebugLine);
 }
 
 // Night lighting: dim ambient, blue-tinted moon, hemisphere for sky/ground
@@ -1499,7 +1502,7 @@ function updateSelectionDropdown() {
 draggableFolder.add(draggableParams, 'saveCoordinates').name('Save control coordinates');
 
 // Debug: Octree visualisation
-const debugParams = { octree: false };
+const debugParams = { octree: false, dragonflyOctree: false };
 const debugFolder = gui.addFolder("Debug");
 debugFolder.add(debugParams, "octree").name("Octree").onChange((v) => {
     if (v) {
@@ -1507,7 +1510,21 @@ debugFolder.add(debugParams, "octree").name("Octree").onChange((v) => {
     } else {
         if (octreeDebugLine) {
             scene.remove(octreeDebugLine);
+            octreeDebugLine.geometry.dispose();
+            octreeDebugLine.material.dispose();
             octreeDebugLine = null;
+        }
+    }
+});
+debugFolder.add(debugParams, "dragonflyOctree").name("Dragonfly Octree").onChange((v) => {
+    if (v) {
+        updateDragonflyOctreeDebugLine();
+    } else {
+        if (dragonflyOctreeDebugLine) {
+            scene.remove(dragonflyOctreeDebugLine);
+            dragonflyOctreeDebugLine.geometry.dispose();
+            dragonflyOctreeDebugLine.material.dispose();
+            dragonflyOctreeDebugLine = null;
         }
     }
 });
@@ -1831,12 +1848,16 @@ function applyDragonflyPhysics(dragonfly) {
     const maxSpeed = dragonfly.maxSpeed * (PARAMS.dragonflies.maxSpeed / 0.35);
     const maxForce = dragonfly.maxForce * (PARAMS.dragonflies.maxForce / 0.04);
 
-    // Separation from other dragonflies (within forceRadius 0.5)
+    // Separation from nearby dragonflies (octree query instead of O(n) scan)
     _dfSep.set(0, 0, 0);
     let sepCount = 0;
-    for (let i = 0; i < dragonflies.length; i++) {
-        const other = dragonflies[i];
-        if (other === dragonfly) continue;
+    _dfFlockBox.setFromCenterAndSize(dragonfly.pos, _dfFlockBoxSize);
+    dragonflyOctree.queryBounds(_dfFlockBox, _dfFlockNeighbors);
+    _dfSeenIds.clear();
+    for (let k = 0; k < _dfFlockNeighbors.length; k++) {
+        const other = _dfFlockNeighbors[k];
+        if (other === dragonfly || _dfSeenIds.has(other.id)) continue;
+        _dfSeenIds.add(other.id);
         const dist = dragonfly.pos.distanceTo(other.pos);
         if (dist > 0 && dist < dragonfly.forceRadius) {
             _dfAvoid.subVectors(dragonfly.pos, other.pos).normalize().divideScalar(dist);
@@ -1867,7 +1888,7 @@ function applyDragonflyPhysics(dragonfly) {
         }
     }
 
-    // Boundary containment (XZ from world bounds, Y from flight bounds)
+    // Boundary containment: apply steering when approaching (XZ from world bounds, Y from flight bounds)
     const bounds = WALKABLE_WORLD_BOUNDS;
     const margin = 5;
     if (dragonfly.pos.x < bounds.min.x + margin) dragonfly.acc.x += 0.5;
@@ -1919,6 +1940,27 @@ function applyDragonflyPhysics(dragonfly) {
     dragonfly.vel.add(dragonfly.acc);
     dragonfly.vel.clampLength(0, maxSpeed);
     dragonfly.pos.add(dragonfly.vel);
+
+    // At boundary: flip velocity to opposite direction and nudge pos back (avoids getting stuck)
+    const m = 5;
+    if (dragonfly.pos.x <= WALKABLE_WORLD_BOUNDS.min.x + m && dragonfly.vel.x < 0) {
+        dragonfly.vel.x = -dragonfly.vel.x * 0.7;
+    }
+    if (dragonfly.pos.x >= WALKABLE_WORLD_BOUNDS.max.x - m && dragonfly.vel.x > 0) {
+        dragonfly.vel.x = -dragonfly.vel.x * 0.7;
+    }
+    if (dragonfly.pos.z <= WALKABLE_WORLD_BOUNDS.min.z + m && dragonfly.vel.z < 0) {
+        dragonfly.vel.z = -dragonfly.vel.z * 0.7;
+    }
+    if (dragonfly.pos.z >= WALKABLE_WORLD_BOUNDS.max.z - m && dragonfly.vel.z > 0) {
+        dragonfly.vel.z = -dragonfly.vel.z * 0.7;
+    }
+    if (dragonfly.pos.y <= DRAGONFLY_MIN_Y + 1 && dragonfly.vel.y < 0) {
+        dragonfly.vel.y = -dragonfly.vel.y * 0.7;
+    }
+    if (dragonfly.pos.y >= DRAGONFLY_MAX_Y - 1 && dragonfly.vel.y > 0) {
+        dragonfly.vel.y = -dragonfly.vel.y * 0.7;
+    }
 
     if (dragonfly.vel.length() > 0.02) {
         const newFacing = Math.atan2(dragonfly.vel.x, dragonfly.vel.z);
@@ -2132,7 +2174,7 @@ function animate() {
     // Apply physics and decision to all people (every 2 frames to save CPU); skip INSIDE
     if (frameCount % 2 === 0) {
         for (let i = 0; i < people.length; i++) {
-            const person = people[i];
+            let person = people[i];
             if (!person || !person.pos || person.state === "INSIDE") continue;
             if (frameCount % SNAP_END_FRAME === 0) {
                 if ((person.getPhone() != null) && (person.state !== "SNAPPING") && (Math.random() < 0.05)) {
@@ -2147,12 +2189,37 @@ function animate() {
         }
     }
 
+    // Dragonfly octree: update bounds and incremental re-insert for movers
+    const DF_OCTREE_MOVE_EPS_SQ = 1e-6;
+    for (let i = 0; i < dragonflies.length; i++) {
+        const df = dragonflies[i];
+        df.bounds.min.set(df.pos.x - df.forceRadius, df.pos.y - df.forceRadius, df.pos.z - df.forceRadius);
+        df.bounds.max.set(df.pos.x + df.forceRadius, df.pos.y + df.forceRadius, df.pos.z + df.forceRadius);
+        if (df.pos.distanceToSquared(df._lastOctreePos) > DF_OCTREE_MOVE_EPS_SQ) {
+            dragonflyOctree.remove(df);
+            dragonflyOctree.insert(df);
+            df._lastOctreePos.copy(df.pos);
+        }
+    }
+
     // Dragonfly A* path recomputation (every 60 frames when follow cursor enabled)
     if (PARAMS.dragonflies.followCursor && dragonflies.length > 0 && frameCount % 60 === 0) {
-        const navGrid = getDragonflyNavGrid();
+        const isLeafBlocked = (leaf) => {
+            const leafCentre = leaf.bounds.getCenter(_astarLeafCenter);
+            const info = walkableSampler.getSurfaceInfo(leafCentre.x, leafCentre.z);
+            if (info.inside && info.y != null && leafCentre.y <= info.y + 0.5) return true;
+            const dx = leafCentre.x - dunelm.position.x;
+            const dz = leafCentre.z - dunelm.position.z;
+            if (dx * dx + dz * dz <= dunelm.userData.radius * dunelm.userData.radius) return true;
+            for (let L = 0; L < lilies.length; L++) {
+                const lx = lilies[L].x, lz = lilies[L].z;
+                if ((leafCentre.x - lx) ** 2 + (leafCentre.z - lz) ** 2 <= LILY_AVOID_RADIUS * LILY_AVOID_RADIUS) return true;
+            }
+            return false;
+        };
         for (let i = 0; i < dragonflies.length; i++) {
             const dragonfly = dragonflies[i];
-            dragonfly.path = findPath(navGrid, dragonfly.pos, cursorWorldPos);
+            dragonfly.path = findPathOctree(dragonflyOctree, dragonfly.pos, cursorWorldPos, isLeafBlocked);
             dragonfly.pathIndex = 0;
         }
     }

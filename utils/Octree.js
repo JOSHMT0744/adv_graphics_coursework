@@ -75,6 +75,41 @@ export class Octree {
         this.root.getCells(cells);
         return cells;
     }
+
+    /**
+     * Find the leaf node containing the given world position.
+     * @param {THREE.Vector3} point
+     * @returns {OctreeNode | null}
+     */
+    getLeafAt(point) {
+        const p = point && point.isVector3 ? point : new THREE.Vector3(point.x, point.y, point.z);
+        if (!this.worldBounds.containsPoint(p)) return null;
+        return this.root.getLeafAt(p);
+    }
+
+    /**
+     * Find all leaf nodes adjacent to the given leaf (bounds touch or overlap when expanded slightly).
+     * @param {OctreeNode} leaf - A leaf node from this octree
+     * @param {OctreeNode[]} [out] - Optional array to fill (cleared first)
+     * @returns {OctreeNode[]}
+     */
+    getLeafNeighbors(leaf, out) {
+        const arr = out || [];
+        arr.length = 0;
+        const eps = 1e-4;
+        const expanded = leaf.bounds.clone();
+        expanded.min.x -= eps;
+        expanded.min.y -= eps;
+        expanded.min.z -= eps;
+        expanded.max.x += eps;
+        expanded.max.y += eps;
+        expanded.max.z += eps;
+        this.root.collectLeaves(expanded, arr);
+        for (let i = arr.length - 1; i >= 0; i--) {
+            if (arr[i] === leaf) arr.splice(i, 1);
+        }
+        return arr;
+    }
 }
 
 class OctreeNode {
@@ -176,15 +211,47 @@ class OctreeNode {
         }
         cells.push(this.bounds.clone());
     }
+
+    /**
+     * Find the leaf node containing the given point (internal traversal).
+     * @param {THREE.Vector3} point
+     * @returns {OctreeNode | null}
+     */
+    getLeafAt(point) {
+        if (!this.bounds.containsPoint(point)) return null;
+        if (this.children) {
+            for (let i = 0; i < 8; i++) {
+                const leaf = this.children[i].getLeafAt(point);
+                if (leaf) return leaf;
+            }
+            return null;
+        }
+        return this;
+    }
+
+    /**
+     * Collect all leaf nodes whose bounds intersect the query box.
+     * @param {THREE.Box3} box
+     * @param {OctreeNode[]} out
+     */
+    collectLeaves(box, out) {
+        if (!this.bounds.intersectsBox(box)) return;
+        if (this.children) {
+            for (let i = 0; i < 8; i++) this.children[i].collectLeaves(box, out);
+            return;
+        }
+        out.push(this);
+    }
 }
 
 /**
  * Create LineSegments from an array of Box3 for debug view.
  * Uses EdgesGeometry + BoxGeometry per cell and merges into one mesh so it always renders.
  * @param {THREE.Box3[]} boxes
+ * @param {{ color?: number }} [options] Optional color (default 0x00ff88)
  * @returns {THREE.LineSegments}
  */
-export function createOctreeDebugLines(boxes) {
+export function createOctreeDebugLines(boxes, options = {}) {
     if (!boxes || boxes.length === 0) return null;
     const size = new THREE.Vector3();
     const center = new THREE.Vector3();
@@ -209,7 +276,7 @@ export function createOctreeDebugLines(boxes) {
         : edgeGeometries[0];
     edgeGeometries.forEach((g) => { if (g !== merged) g.dispose(); });
     const line = new THREE.LineSegments(merged, new THREE.LineBasicMaterial({
-        color: 0x00ff88,
+        color: options.color ?? 0x00ff88,
         depthTest: false,
         depthWrite: false,
         renderOrder: 999

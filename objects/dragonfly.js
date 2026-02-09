@@ -82,8 +82,8 @@ export function getDragonflyMaterial() {
 
 /**
  * Creates a lightweight dragonfly entity for instanced rendering.
- * @param {{ position?: THREE.Vector3 }} options
- * @returns {Object} Dragonfly entity with pos, vel, acc, physics params, etc.
+ * @param {{ position?: THREE.Vector3, id?: number }} options
+ * @returns {Object} Dragonfly entity with pos, vel, acc, bounds, id, physics params, etc.
  */
 export function createDragonfly(options = {}) {
     const position = options.position;
@@ -103,10 +103,18 @@ export function createDragonfly(options = {}) {
         (Math.random() - 0.5) * maxSpeed * 0.5
     );
 
+    const r = FORCE_RADIUS;
+    const bounds = new THREE.Box3(
+        new THREE.Vector3(pos.x - r, pos.y - r, pos.z - r),
+        new THREE.Vector3(pos.x + r, pos.y + r, pos.z + r)
+    );
+
     return {
+        id: options.id ?? -1,
         pos,
         vel,
         acc: new THREE.Vector3(),
+        bounds,
         maxSpeed,
         maxForce,
         forceRadius: FORCE_RADIUS,
@@ -116,6 +124,7 @@ export function createDragonfly(options = {}) {
         pathIndex: 0,
         color,
         bankAngle: 0,
-        facingAngle: Math.atan2(vel.x, vel.z)
+        facingAngle: Math.atan2(vel.x, vel.z),
+        _lastOctreePos: pos.clone()
     };
 }
