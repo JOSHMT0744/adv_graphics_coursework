@@ -13,7 +13,7 @@ const DEFAULT_OPTIONS = {
     petalLength: 20,
     petalColor: 0xff44aa,
     stemColor: 0x22aa88,
-    emissiveIntensity: 1,
+    emissiveIntensity: 3,
     transparent: false,
 };
 
@@ -21,9 +21,15 @@ const PETAL_SEGMENTS_U = 20;
 const PETAL_SEGMENTS_V = 12;
 
 /** Angle from vertical (radians): 6 outer petals. */
-const PETAL_ANGLE_OUTER = (30 * Math.PI) / 180;
+export const PETAL_ANGLE_OUTER = (30 * Math.PI) / 180;
 /** Angle from vertical (radians): 3 inner petals. */
-const PETAL_ANGLE_INNER = (40 * Math.PI) / 180;
+export const PETAL_ANGLE_INNER = (40 * Math.PI) / 180;
+
+/** Layout for instancing: [{ angle, azimuth }, ...] for 9 petals (6 outer, 3 inner). */
+export const PETAL_LAYOUT = [
+    ...Array.from({ length: 6 }, (_, i) => ({ angle: PETAL_ANGLE_OUTER, azimuth: (i * 60 * Math.PI) / 180 })),
+    ...Array.from({ length: 3 }, (_, i) => ({ angle: PETAL_ANGLE_INNER, azimuth: ((40 + i * 120) * Math.PI) / 180 })),
+];
 
 /**
  * Build 4×4 control grid for one petal in local space.
@@ -79,6 +85,31 @@ function buildPetalGeometry(grid) {
     return geo;
 }
 
+let _sharedPetalGeometry = null;
+let _sharedStemGeometry = null;
+
+/** Shared petal BufferGeometry (single B-spline patch, default length) for InstancedMesh. */
+export function getSharedPetalGeometry() {
+    if (!_sharedPetalGeometry) {
+        const grid = createPetalControlGrid(DEFAULT_OPTIONS.petalLength);
+        _sharedPetalGeometry = buildPetalGeometry(grid);
+    }
+    return _sharedPetalGeometry;
+}
+
+/** Shared stem BufferGeometry (unit height cylinder, scale Y by stemHeight in instance matrix). */
+export function getSharedStemGeometry() {
+    if (!_sharedStemGeometry) {
+        _sharedStemGeometry = new THREE.CylinderGeometry(
+            DEFAULT_OPTIONS.stemRadiusTop,
+            DEFAULT_OPTIONS.stemRadiusBottom,
+            1,
+            16
+        );
+    }
+    return _sharedStemGeometry;
+}
+
 /**
  * Create stem mesh (cylinder, origin at base, +Y up). Widens at top.
  * @param {number} height
@@ -128,12 +159,15 @@ export function createLilyStructure(x = 0, y = 0, z = 0, options = {}) {
     const petalGrid = createPetalControlGrid(petalLength);
     const petalGeometry = buildPetalGeometry(petalGrid);
 
-    // Petal material: emissive, double-sided
+    // Petal material: emissive, double-sided. Scale emissive so all colours have equal perceived luminosity.
     const petalColor = new THREE.Color(opts.petalColor);
+    const lum = 0.299 * petalColor.r + 0.587 * petalColor.g + 0.114 * petalColor.b;
+    const targetLum = 0.5;
+    const petalEmissiveIntensity = lum > 1e-4 ? targetLum / lum : opts.emissiveIntensity;
     const petalMat = new THREE.MeshStandardMaterial({
         color: petalColor,
         emissive: petalColor.clone(),
-        emissiveIntensity: opts.emissiveIntensity,
+        emissiveIntensity: Math.min(petalEmissiveIntensity, 4),
         side: THREE.DoubleSide,
         transparent: opts.transparent,
         opacity: opts.transparent ? 0.9 : 1,
@@ -148,7 +182,7 @@ export function createLilyStructure(x = 0, y = 0, z = 0, options = {}) {
         petal.rotation.y = azimuth;
         petal.rotation.x = PETAL_ANGLE_OUTER;
         petal.castShadow = false;
-        petal.receiveShadow = false;
+        petal.receiveShadow = true;
         group.add(petal);
     }
 
@@ -163,6 +197,13 @@ export function createLilyStructure(x = 0, y = 0, z = 0, options = {}) {
         petal.castShadow = false;
         petal.receiveShadow = false;
         group.add(petal);
+    }
+
+    // Optional point light at flower so emissive "glow" contributes to scene lighting (e.g. SU window reflections)
+    if (opts.addLight) {
+        const flowerLight = new THREE.PointLight(petalColor, 0.5, 18, 1.5);
+        flowerLight.position.set(0, stemHeight, 0);
+        group.add(flowerLight);
     }
 
     group.position.set(x, y, z);

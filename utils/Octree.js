@@ -59,6 +59,14 @@ export class Octree {
     }
 
     /**
+     * Remove one entity from all leaves it was in (for incremental updates).
+     * @param {{ id: number, bounds: THREE.Box3 }} entity
+     */
+    remove(entity) {
+        this.root.remove(entity);
+    }
+
+    /**
      * Return all leaf cell bounds for debug rendering.
      * @returns {THREE.Box3[]}
      */
@@ -149,6 +157,16 @@ class OctreeNode {
         if (this.children) {
             for (let i = 0; i < 8; i++) this.children[i].clear();
         }
+    }
+
+    remove(entity) {
+        if (!this.bounds.intersectsBox(entity.bounds)) return;
+        if (this.children) {
+            for (let i = 0; i < 8; i++) this.children[i].remove(entity);
+            return;
+        }
+        const idx = this.entities.indexOf(entity);
+        if (idx !== -1) this.entities.splice(idx, 1);
     }
 
     getCells(cells) {

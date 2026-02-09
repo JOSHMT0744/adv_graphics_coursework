@@ -4,49 +4,50 @@ const textureLoader = new THREE.TextureLoader();
 
 /**
  * Create a procedural cube env map for window reflections (no CubeCamera / extra renders).
- * Night-themed: +Y = dark blue/purple sky, -Y = dark ground, lateral = dark gray.
+ * Night-themed but with enough contrast and brightness so reflections are visible on windows.
  * @returns {THREE.CubeTexture}
  */
-function createDefaultEnvMap() {
-    const size = 16;
-    const canvases = [];
+export function createDefaultEnvMap() {
+    const size = 32;
     const hexToStyle = (h) => '#' + h.toString(16).padStart(6, '0');
-    // +X, -X: dark gray
+    const canvases = [];
+    // +X, -X: mid grey so reflection is visible
     for (let i = 0; i < 2; i++) {
         const c = document.createElement('canvas');
         c.width = size; c.height = size;
         const ctx = c.getContext('2d');
-        ctx.fillStyle = hexToStyle(0x2a2a35);
+        ctx.fillStyle = hexToStyle(0x404055);
         ctx.fillRect(0, 0, size, size);
         canvases.push(c);
     }
-    // +Y (sky): dark blue/purple gradient (night)
+    // +Y (sky): blue/purple gradient, brighter so sky reflection reads
     (function () {
         const c = document.createElement('canvas');
         c.width = size; c.height = size;
         const ctx = c.getContext('2d');
         const g = ctx.createLinearGradient(0, size, 0, 0);
-        g.addColorStop(0, hexToStyle(0x1a1a28));
-        g.addColorStop(1, hexToStyle(0x2a2544));
+        g.addColorStop(0, hexToStyle(0x252538));
+        g.addColorStop(0.5, hexToStyle(0x35355a));
+        g.addColorStop(1, hexToStyle(0x404070));
         ctx.fillStyle = g;
         ctx.fillRect(0, 0, size, size);
         canvases.push(c);
     })();
-    // -Y (ground): dark gray-blue
+    // -Y (ground): darker grey-blue
     (function () {
         const c = document.createElement('canvas');
         c.width = size; c.height = size;
         const ctx = c.getContext('2d');
-        ctx.fillStyle = hexToStyle(0x1e2228);
+        ctx.fillStyle = hexToStyle(0x2a2e38);
         ctx.fillRect(0, 0, size, size);
         canvases.push(c);
     })();
-    // +Z, -Z: dark gray
+    // +Z, -Z: mid grey
     for (let i = 0; i < 2; i++) {
         const c = document.createElement('canvas');
         c.width = size; c.height = size;
         const ctx = c.getContext('2d');
-        ctx.fillStyle = hexToStyle(0x2a2a35);
+        ctx.fillStyle = hexToStyle(0x404055);
         ctx.fillRect(0, 0, size, size);
         canvases.push(c);
     }
@@ -55,16 +56,24 @@ function createDefaultEnvMap() {
     return cube;
 }
 
+/** Glass material with transmission so interior lights pass through. envMap required for reflections. */
+function createGlassWindowMat(envMap) {
+    return new THREE.MeshPhysicalMaterial({
+        color: 0xffffff,
+        transmission: 1,
+        opacity: 1,
+        metalness: 0,
+        roughness: 0,
+        ior: 1.5,
+        thickness: 0.1,
+        envMap: envMap,
+    });
+}
+
 let _defaultWindowMat = null;
 function getDefaultWindowMat() {
     if (!_defaultWindowMat) {
-        _defaultWindowMat = new THREE.MeshStandardMaterial({
-            color: 0x444860,
-            metalness: 0.9,
-            roughness: 0.12,
-            envMap: createDefaultEnvMap(),
-            envMapIntensity: 1.8
-        });
+        _defaultWindowMat = createGlassWindowMat(createDefaultEnvMap());
     }
     return _defaultWindowMat;
 }
@@ -124,19 +133,16 @@ const concreteTexture = textureLoader.load('textures/concrete_ground_01_2k/concr
     }
 );
 
-// Materials: flat grey concrete, reflective windows (envMap-based), dark railing
+// Materials: flat grey concrete, reflective windows (transmission glass), dark railing
 const concreteMat = new THREE.MeshStandardMaterial({ map: concreteTexture });
 const railingMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a });
 
 const RECESS = 0.03;
-// Small outward offset so window planes sit in front of the block face and are not occluded by it.
-// (Placing them inward with -recess put them behind the box geometry and hid them.)
 const WINDOW_FACE_OFFSET = 0.002;
+const _windowDummy = new THREE.Object3D();
 
 /**
- * Add a grid of window planes on one face of a block.
- * Uses envMap-based reflective material (no extra render passes).
- * Windows are offset slightly outward from the face to avoid being occluded by the block.
+ * Add a grid of window planes on one face of a block as one InstancedMesh.
  * @param {THREE.Group} parentGroup - Block group to add windows to.
  * @param {string} face - 'front'|'back'
  * @param {number} blockW - block width (X)
@@ -145,14 +151,14 @@ const WINDOW_FACE_OFFSET = 0.002;
  * @param {number} countX - number of windows in the face's horizontal direction
  * @param {number} countY - number of windows in the face's vertical direction
  * @param {number} recess - reserved (unused; kept for API compatibility)
- * @param {THREE.Material} windowMaterial - material for windows (envMap-based for reflections)
+ * @param {THREE.Material} windowMaterial - material for windows (transmission glass with envMap)
  */
 function addWindowGrid(parentGroup, face, blockW, blockH, blockD, countX, countY, recess = RECESS, windowMaterial) {
     let sizeW, sizeH, centre, normal, rotY;
     const w2 = blockW / 2, h2 = blockH / 2, d2 = blockD / 2;
 
     switch (face) {
-        case 'front':  // -Z face
+        case 'front':
             sizeW = blockW; sizeH = blockH; centre = new THREE.Vector3(0, 0, -d2); normal = new THREE.Vector3(0, 0, -1); rotY = Math.PI; break;
         case 'back':
             sizeW = blockW; sizeH = blockH; centre = new THREE.Vector3(0, 0, d2);  normal = new THREE.Vector3(0, 0, 1);  rotY = 0; break;
@@ -161,25 +167,29 @@ function addWindowGrid(parentGroup, face, blockW, blockH, blockD, countX, countY
 
     const stepX = sizeW / (countX + 1), stepY = sizeH / (countY + 1);
     const winW = Math.max(0.08, stepX * 0.85), winH = Math.max(0.15, stepY * 0.85);
-
+    const count = countX * countY;
     const geo = new THREE.PlaneGeometry(winW, winH);
+    const instanced = new THREE.InstancedMesh(geo, windowMaterial, count);
+    instanced.renderOrder = 1;
+    instanced.layers.set(1);
+
+    let idx = 0;
     for (let i = 0; i < countX; i++) {
         for (let j = 0; j < countY; j++) {
             const u = (i + 1) * stepX - sizeW / 2, v = (j + 1) * stepY - sizeH / 2;
             const pos = new THREE.Vector3(centre.x, centre.y, centre.z);
             if (face === 'front' || face === 'back') { pos.x += u; pos.y += v; }
             else { pos.z += u; pos.y += v; }
-            // Offset outward along the face normal so windows are in front of the block and visible
             pos.add(normal.clone().multiplyScalar(WINDOW_FACE_OFFSET));
 
-            const m = new THREE.Mesh(geo, windowMaterial);
-            m.position.copy(pos);
-            m.rotation.y = rotY;
-            // Layer 1: excluded from CubeCamera capture so dynamic env doesn't include windows (avoids recursion)
-            m.layers.set(1);
-            parentGroup.add(m);
+            _windowDummy.position.copy(pos);
+            _windowDummy.rotation.y = rotY;
+            _windowDummy.updateMatrix();
+            instanced.setMatrixAt(idx++, _windowDummy.matrix);
         }
     }
+    instanced.instanceMatrix.needsUpdate = true;
+    parentGroup.add(instanced);
 }
 
 /**
@@ -294,7 +304,7 @@ function createSlantedRoof(w, d, slantAngle, blockTop) {
  */
 export function createDunelmHouse(x = 0, z = 0, scale = 1, options = {}) {
     const dunelm = new THREE.Group();
-    const mat = (env) => new THREE.MeshStandardMaterial({ color: 0x444860, metalness: 0.9, roughness: 0.12, envMap: env, envMapIntensity: 1.8 });
+    const mat = (env) => new THREE.MeshStandardMaterial({ color: 0x383a48, metalness: 0.95, roughness: 0.04, envMap: env, envMapIntensity: 2.2, transparent: true, opacity: 0.88 });
     let windowMaterials;
     let wmat, wmatBack;
 
@@ -319,7 +329,7 @@ export function createDunelmHouse(x = 0, z = 0, scale = 1, options = {}) {
     const blockMatBack = windowMaterials != null ? null : wmatBack;
 
     // blockLeft: tall tower (2.5, 6, 2.5) at (-3.5, 3, 2)
-    const blockLeft = createBlock(2.5, 6, 2.5, { front: [2, 4], back: [2, 3] }, blockMat, blockMatBack);
+    const blockLeft = createBlock(2.5, 6, 2.5, { front: [2, 3], back: [2, 3] }, blockMat, blockMatBack);
     blockLeft.position.set(-3.5, 3, 2);
     const fl = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.5, 0.02), concreteMat);
     fl.position.set(0, 0, -2.5 / 2 - 0.02);
@@ -355,6 +365,8 @@ export function createDunelmHouse(x = 0, z = 0, scale = 1, options = {}) {
         doorGroup.userData.isOpen = angle !== 0;
     };
     blockLeft.add(doorGroup);
+    dunelm.userData.doorGroup = doorGroup;
+    dunelm.userData.doorExitDirection = new THREE.Vector3(-1, 0, 0); // outward from door (-X face)
 
     const entryPlane = new THREE.Mesh(
         new THREE.PlaneGeometry(doorWidth, doorHeight),
@@ -367,7 +379,7 @@ export function createDunelmHouse(x = 0, z = 0, scale = 1, options = {}) {
     dunelm.add(blockLeft);
 
     // blockMain: (5, 4, 4) at (-0.5, 2, 0)
-    const blockMain = createBlock(5, 4, 4, { front: [4, 3], back: [3, 2] }, blockMat, blockMatBack);
+    const blockMain = createBlock(5, 4, 4, { front: [3, 3], back: [3, 3] }, blockMat, blockMatBack);
     blockMain.position.set(-0.5, 2, 0);
     [-0.5, 0.5].forEach((ox) => {
         const f = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.2, 0.02), concreteMat);
@@ -377,7 +389,7 @@ export function createDunelmHouse(x = 0, z = 0, scale = 1, options = {}) {
     dunelm.add(blockMain);
 
     // blockCantilever: (4, 2.5, 3) at (0, 0.8, -2), slanted roof
-    const blockCantilever = createBlock(4, 2.5, 3, { front: [3, 2], back: [2, 2], left: [2, 2], right: [2, 2] }, blockMat, blockMatBack);
+    const blockCantilever = createBlock(4, 2.5, 3, { front: [3, 1], back: [0, 0]}, blockMat, blockMatBack);
     blockCantilever.position.set(0, 0.8, -2);
     const cantileverRoof = createSlantedRoof(4, 3, 0.25, 2.5 / 2);
     blockCantilever.add(cantileverRoof);
@@ -413,32 +425,13 @@ export function createDunelmHouse(x = 0, z = 0, scale = 1, options = {}) {
     terrace.add(bar);
     dunelm.add(terrace);
 
-    // --- Stairs: from (-4,0,0) toward (-2.5,1.5,1), 5 treads + railing ---
-    const stairs = new THREE.Group();
-    const riserH = 0.3, treadD = 0.36, treadW = 1.2;
-    const runX = 1.5 / 5, runZ = 1 / 5;
-    const stepAngle = Math.atan2(1, 1.5);
-    for (let i = 0; i < 5; i++) {
-        const t = new THREE.Mesh(new THREE.BoxGeometry(treadD, riserH, treadW), concreteMat);
-        t.position.set(-4 + (i + 0.5) * runX, (i + 0.5) * riserH, (i + 0.5) * runZ);
-        t.rotation.y = stepAngle;
-        stairs.add(t);
-    }
-    const perpX = -1 / Math.sqrt(3.25), perpZ = 1.5 / Math.sqrt(3.25);
-    for (let i = 0; i < 5; i++) {
-        const post = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.4, 0.04), railingMat);
-        post.position.set(
-            -4 + (i + 0.5) * runX + (treadW / 2) * perpX,
-            (i + 1) * riserH + 0.2,
-            (i + 0.5) * runZ + (treadW / 2) * perpZ
-        );
-        stairs.add(post);
-    }
-    const topBar = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.04, 0.04), railingMat);
-    topBar.rotation.y = stepAngle;
-    topBar.position.set(-3.25, 1.55, 0.5);
-    stairs.add(topBar);
-    dunelm.add(stairs);
+    // Two point lights inside the SU so transmission glass shows light through the windows
+    const interiorLight = new THREE.PointLight(0xffeedd, 1.2, 8, 2);
+    interiorLight.position.set(-0.5, 2, 0);
+    dunelm.add(interiorLight);
+    const towerLight = new THREE.PointLight(0xffddbb, 0.6, 6, 2);
+    towerLight.position.set(-3.5, 2.5, 2);
+    dunelm.add(towerLight);
 
     dunelm.position.set(x, 0, z);
     dunelm.scale.setScalar(scale);

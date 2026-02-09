@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { evalBezierSurface } from "../objects/surface.js";
+import { getBSplineSurfaceWorldPointAtNormalized } from "../objects/bsplineSurface.js";
 
 const BEZIER_GRID_SIZE = 20;
 const NEWTON_EPS = 1e-5;
@@ -73,6 +74,86 @@ export function createBezierSampler(controlPoints) {
             const u = Math.random();
             const v = Math.random();
             return evalBezierSurface(u, v, controlPoints);
+        },
+        contains(x, z) {
+            const { onSurface } = projectToSurface(x, z);
+            return onSurface;
+        },
+        getY(x, z) {
+            const { y, onSurface } = projectToSurface(x, z);
+            return onSurface ? y : null;
+        }
+    };
+}
+
+const BSPLINE_GRID_SIZE = 20;
+
+/**
+ * Create a sampler for a B-spline surface (e.g. grass). Uses getBSplineSurfaceWorldPointAtNormalized
+ * for world-space evaluation. sample() returns a random world point on the surface.
+ * contains(x,z) / getY(x,z) use Newton iteration in (u,v) to project (x,z) onto the surface.
+ * @param {THREE.Group} group - B-spline group from createBSplineSurface (with userData.bspline)
+ * @param {THREE.Vector3[]} controlPoints - Flat array of control points (dimU * dimV)
+ * @returns {{ sample: () => THREE.Vector3, contains: (x: number, z: number) => boolean, getY: (x: number, z: number) => number | null }}
+ */
+export function createBSplineSampler(group, controlPoints) {
+    const _eval = new THREE.Vector3();
+    const gridXs = [];
+    const gridZs = [];
+    for (let i = 0; i <= BSPLINE_GRID_SIZE; i++) {
+        const u = i / BSPLINE_GRID_SIZE;
+        for (let j = 0; j <= BSPLINE_GRID_SIZE; j++) {
+            const v = j / BSPLINE_GRID_SIZE;
+            getBSplineSurfaceWorldPointAtNormalized(group, controlPoints, u, v, _eval);
+            gridXs.push(_eval.x);
+            gridZs.push(_eval.z);
+        }
+    }
+    const minX = Math.min(...gridXs);
+    const maxX = Math.max(...gridXs);
+    const minZ = Math.min(...gridZs);
+    const maxZ = Math.max(...gridZs);
+
+    function projectToSurface(x, z) {
+        if (x < minX || x > maxX || z < minZ || z > maxZ) return { y: null, onSurface: false };
+        let u = Math.max(0.001, Math.min(0.999, (maxX - minX) ? (x - minX) / (maxX - minX) : 0.5));
+        let v = Math.max(0.001, Math.min(0.999, (maxZ - minZ) ? (z - minZ) / (maxZ - minZ) : 0.5));
+        for (let iter = 0; iter < NEWTON_MAX_ITER; iter++) {
+            getBSplineSurfaceWorldPointAtNormalized(group, controlPoints, u, v, _eval);
+            const baseX = _eval.x, baseZ = _eval.z;
+            const errX = x - baseX;
+            const errZ = z - baseZ;
+            if (Math.abs(errX) < NEWTON_TOL && Math.abs(errZ) < NEWTON_TOL) {
+                const onSurface = u >= 0 && u <= 1 && v >= 0 && v <= 1;
+                return { y: _eval.y, onSurface };
+            }
+            getBSplineSurfaceWorldPointAtNormalized(group, controlPoints, u + NEWTON_EPS, v, _eval);
+            const P_u_x = _eval.x, P_u_z = _eval.z;
+            getBSplineSurfaceWorldPointAtNormalized(group, controlPoints, u, v + NEWTON_EPS, _eval);
+            const P_v_x = _eval.x, P_v_z = _eval.z;
+            const dx_du = (P_u_x - baseX) / NEWTON_EPS;
+            const dx_dv = (P_v_x - baseX) / NEWTON_EPS;
+            const dz_du = (P_u_z - baseZ) / NEWTON_EPS;
+            const dz_dv = (P_v_z - baseZ) / NEWTON_EPS;
+            const det = dx_du * dz_dv - dx_dv * dz_du;
+            if (Math.abs(det) < 1e-12) break;
+            const du = (errX * dz_dv - errZ * dx_dv) / det;
+            const dv = (errZ * dx_du - errX * dz_du) / det;
+            u = Math.max(0, Math.min(1, u + du));
+            v = Math.max(0, Math.min(1, v + dv));
+        }
+        getBSplineSurfaceWorldPointAtNormalized(group, controlPoints, u, v, _eval);
+        const err = Math.hypot(x - _eval.x, z - _eval.z);
+        const onSurface = u >= 0 && u <= 1 && v >= 0 && v <= 1 && err < NEWTON_TOL * 10;
+        return { y: _eval.y, onSurface };
+    }
+
+    return {
+        sample() {
+            const u = Math.random();
+            const v = Math.random();
+            getBSplineSurfaceWorldPointAtNormalized(group, controlPoints, u, v, _eval);
+            return _eval.clone();
         },
         contains(x, z) {
             const { onSurface } = projectToSurface(x, z);
@@ -322,24 +403,98 @@ export function createStaircaseSampler(start, end, width, stepHeight = 0.5) {
     };
 }
 
+const HEIGHT_GRID_SENTINEL = NaN;
+
 /**
  * Combine multiple regions; sampleRandom() picks a random region and samples from it.
  * getSurfaceInfo(x,z) returns { inside, y } for the first region that contains (x,z).
+ * If options.bounds and options.cellSize are provided, a height-field grid is precomputed for O(1) lookup
+ * with bilinear interpolation; falls back to region iteration for cells not covered.
  * @param {Array<{ sample: () => THREE.Vector3, contains?: (x: number, z: number) => boolean, getY?: (x: number, z: number) => number | null }>} regions
+ * @param {{ bounds?: { minX: number, maxX: number, minZ: number, maxZ: number }, cellSize?: number }} [options]
  * @returns {{ sampleRandom: () => THREE.Vector3, getSurfaceInfo: (x: number, z: number) => { inside: boolean, y: number | null } }}
  */
-export function createCombinedSampler(regions) {
+export function createCombinedSampler(regions, options = {}) {
+    const bounds = options.bounds;
+    const cellSize = options.cellSize ?? 1;
+    let heightGrid = null;
+    let gridMinX = 0, gridMaxX = 0, gridMinZ = 0, gridMaxZ = 0;
+    let numX = 0, numZ = 0;
+
+    if (bounds && bounds.minX != null && bounds.maxX != null && bounds.minZ != null && bounds.maxZ != null && cellSize > 0) {
+        gridMinX = bounds.minX;
+        gridMaxX = bounds.maxX;
+        gridMinZ = bounds.minZ;
+        gridMaxZ = bounds.maxZ;
+        numX = Math.max(1, Math.ceil((gridMaxX - gridMinX) / cellSize));
+        numZ = Math.max(1, Math.ceil((gridMaxZ - gridMinZ) / cellSize));
+        heightGrid = new Float64Array(numX * numZ);
+        heightGrid.fill(HEIGHT_GRID_SENTINEL);
+        for (let i = 0; i < numX; i++) {
+            const x = gridMinX + (i + 0.5) * cellSize;
+            for (let j = 0; j < numZ; j++) {
+                const z = gridMinZ + (j + 0.5) * cellSize;
+                for (let ri = 0; ri < regions.length; ri++) {
+                    const r = regions[ri];
+                    if (r.contains && r.contains(x, z)) {
+                        const y = r.getY ? r.getY(x, z) : null;
+                        if (y != null) {
+                            heightGrid[i * numZ + j] = y;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    function getCellY(ix, iz) {
+        if (ix < 0 || ix >= numX || iz < 0 || iz >= numZ) return HEIGHT_GRID_SENTINEL;
+        const v = heightGrid[ix * numZ + iz];
+        return v !== v ? HEIGHT_GRID_SENTINEL : v; // NaN check
+    }
+
     return {
         sampleRandom() {
             const i = Math.floor(Math.random() * regions.length);
             return regions[i].sample();
         },
-        getSurfaceInfo(x, z) {
+        getSurfaceInfo(x, z, cache) {
+            if (heightGrid) {
+                const fx = (x - gridMinX) / cellSize;
+                const fz = (z - gridMinZ) / cellSize;
+                const ix = Math.floor(fx);
+                const iz = Math.floor(fz);
+                const ix1 = ix + 1;
+                const iz1 = iz + 1;
+                const y00 = getCellY(ix, iz);
+                const y10 = getCellY(ix1, iz);
+                const y01 = getCellY(ix, iz1);
+                const y11 = getCellY(ix1, iz1);
+                const allValid = y00 === y00 && y10 === y10 && y01 === y01 && y11 === y11;
+                if (allValid) {
+                    const tx = Math.max(0, Math.min(1, fx - ix));
+                    const tz = Math.max(0, Math.min(1, fz - iz));
+                    const y = (1 - tx) * (1 - tz) * y00 + tx * (1 - tz) * y10 + (1 - tx) * tz * y01 + tx * tz * y11;
+                    return { inside: true, y };
+                }
+            }
+            const cachedIdx = (cache && typeof cache.regionIndex === 'number' && cache.regionIndex >= 0 && cache.regionIndex < regions.length) ? cache.regionIndex : -1;
+            if (cachedIdx >= 0) {
+                const r = regions[cachedIdx];
+                if (r.contains && r.contains(x, z)) {
+                    const y = r.getY ? r.getY(x, z) : null;
+                    if (y != null) return { inside: true, y };
+                }
+            }
             for (let i = 0; i < regions.length; i++) {
                 const r = regions[i];
                 if (r.contains && r.contains(x, z)) {
                     const y = r.getY ? r.getY(x, z) : null;
-                    return { inside: true, y };
+                    if (y != null) {
+                        if (cache) cache.regionIndex = i;
+                        return { inside: true, y };
+                    }
                 }
             }
             return { inside: false, y: null };

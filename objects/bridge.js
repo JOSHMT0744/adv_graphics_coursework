@@ -74,108 +74,31 @@ function createTaperedHexCylinder(radiusTop, radiusBottom, height) {
     return new THREE.CylinderGeometry(radiusTop, radiusBottom, height, 10);
 }
 
-/**
- * Prong as a box from (0,0,0) to (runX, riseY, 0). Box length = Euclidean distance;
- * cross-section (crossX, crossZ). Box center stays at origin; parent positions it.
- * @param {number} runX - signed (positive = +X)
- * @param {number} riseY
- * @param {number} crossX - width in X when runX=0
- * @param {number} crossZ - depth in Z
- * @param {THREE.Material} material
- * @returns {THREE.Mesh}
- */
-function createProng(runX, riseY, crossX, crossZ, material) {
-    const length = Math.sqrt(runX * runX + riseY * riseY);
-    const geo = new THREE.BoxGeometry(crossX, length, crossZ);
-    const mesh = new THREE.Mesh(geo, material);
-    // Default box Y is "length"; rotate so +Y aligns with (runX, riseY, 0)
-    const angle = Math.atan2(runX, riseY);
-    mesh.rotation.z = -angle;
-    return mesh;
-}
+const _dummy = new THREE.Object3D();
 
 /**
- * One pier: tapered cylinder + two prongs. Local: cylinder bottom at y=-baseHeight,
- * top at y=-baseHeight+cylHeight. Prongs from (0, -baseHeight+cylHeight, 0) to
- * (±(deckWidth/2), deckBottomY, 0). Here deckBottomY=0, so run=±W/2, rise=baseHeight-cylHeight.
- * Group positioned at (0, 0, zBase).
- * @param {number} zBase - z of this pier (e.g. +L/2 or -L/2)
- * @param {number} baseHeight // height of the footbridge
- * @param {number} cylHeight
- * @param {number} W2 - deck half-width
- * @param {number} deckBottomY - y of deck underside (0 in our schema)
- * @param {THREE.Material} material
- * @param {number} radiusTop
- * @param {number} radiusBottom
- * @param {number} prongCrossX
- * @param {number} prongCrossZ
- * @returns {THREE.Group}
- */
-function createBase(zBase, baseHeight, cylHeight, W2, deckBottomY, material, radiusTop, radiusBottom, prongCrossX, prongCrossZ) {
-    const pier = new THREE.Group();
-    pier.position.z = zBase;
-
-    const cylTop = -baseHeight + cylHeight;
-    const cylGeo = createTaperedHexCylinder(radiusTop, radiusBottom, cylHeight);
-    const cyl = new THREE.Mesh(cylGeo, material);
-    cyl.position.y = -baseHeight + cylHeight / 2;
-    pier.add(cyl);
-
-    const riseY = deckBottomY - cylTop;
-    // Place prong so its start (at cylinder) is (0, cylTop, 0). Box center is at
-    // ±(runX/2, riseY/2, 0) from start; so position = (0, cylTop, 0) + (runX/2, riseY/2, 0).
-    // Right prong (+X): runX=+W2
-    const prongR = createProng(W2, riseY, prongCrossX, prongCrossZ, material);
-    prongR.position.set(W2 / 2, cylTop + riseY / 2, 0);
-    pier.add(prongR);
-    // Left prong (-X): runX=-W2 → offset (-W2/2, riseY/2, 0)
-    const prongL = createProng(-W2, riseY, prongCrossX, prongCrossZ, material);
-    prongL.position.set(-W2 / 2, cylTop + riseY / 2, 0);
-    pier.add(prongL);
-
-    return pier;
-}
-
-/**
- * Railing on one long edge: solid concrete block with floor point lights at each
- * spacing, at the corner between the deck and the railing.
- * @param {number} side - +1 for +X (right), -1 for -X (left)
+ * Railing lights only (for use with instanced railing blocks).
+ * @param {number} side - +1 or -1
  * @param {number} L - deck length
  * @param {number} W - deck width
  * @param {number} T - deck thickness
- * @param {THREE.Material} material - for the concrete railing
- * @param {number} railingHeight
- * @param {number} railingWidth - thickness of the block outward from the deck
- * @param {number} lightSpacing - distance between lights along Z
- * @param {Object} lightOpts - lightIntensity, lightDistance, lightColor
+ * @param {number} lightSpacing
+ * @param {Object} lightOpts - lightIntensity, lightDistance
  * @returns {THREE.Group}
  */
-function createRailing(side, L, W, T, material, railingHeight, railingWidth, lightSpacing, lightOpts) {
+function createRailingLightsOnly(side, L, W, T, lightSpacing, lightOpts) {
     const railingGroup = new THREE.Group();
-    const xCenter = side * (W / 2 + railingWidth / 2);
-
-    // Solid concrete block railing: runs full length L, sits on deck from y=T
-    const block = new THREE.Mesh(
-        new THREE.BoxGeometry(railingWidth, railingHeight, L),
-        material
-    );
-    block.position.set(xCenter, T + railingHeight / 2, 0);
-    railingGroup.add(block);
-
-    // Floor lights at each spacing: small point lights at the corner (deck / railing base)
     const numLights = Math.max(2, Math.floor(L / lightSpacing) + 1);
     const lightColors = Array.from({ length: numLights }, () => Math.floor(Math.random() * 0x1000000));
     const step = L / (numLights - 1);
     const xCorner = side * (W / 2 - 0.001);
     const { lightIntensity, lightDistance } = lightOpts;
-
     for (let i = 0; i < numLights; i++) {
         const z = -L / 2 + i * step;
         const pl = new THREE.PointLight(lightColors[i], lightIntensity, lightDistance, 2);
         pl.position.set(xCorner, T + 0.02, z);
         railingGroup.add(pl);
     }
-
     return railingGroup;
 }
 
@@ -193,6 +116,10 @@ export function createKingsgateBridge(x = 0, y = 0, z = 0, scale = 1, options = 
     const L = bridgeOptions.deckLength, W = bridgeOptions.deckWidth, T = bridgeOptions.deckThickness;
     const W2 = W / 2;
     const L2 = L / 2 - 5;
+    const baseHeight = bridgeOptions.baseHeight;
+    const cylHeight = bridgeOptions.cylHeight;
+    const cylTop = -baseHeight + cylHeight;
+    const riseY = -cylTop;
 
     const concreteMaterial = new THREE.MeshStandardMaterial({ color: bridgeOptions.concreteColor });
     const deckTexture = getTexture('textures/concrete_tiles_01_2k/concrete_tiles_01_2k/concrete_tiles_01_color_2k.png', "Error loading deck texture");
@@ -200,23 +127,67 @@ export function createKingsgateBridge(x = 0, y = 0, z = 0, scale = 1, options = 
 
     const bridgeGroup = new THREE.Group();
 
-    // 1. Deck (Box X=W, Y=T, Z=L); lift by T/2 so bottom at y=0
+    // 1. Deck
     const deck = new THREE.Mesh(new THREE.BoxGeometry(W, T, L), deckMaterial);
     deck.position.y = T / 2;
     bridgeGroup.add(deck);
 
-    // 2. Railings: solid concrete blocks with floor point lights at each spacing
+    // 2. Railings: one InstancedMesh for both blocks + two light groups
     const lightOpts = {
         lightIntensity: bridgeOptions.lightIntensity,
         lightDistance: bridgeOptions.lightDistance,
     };
+    const railingGeo = new THREE.BoxGeometry(bridgeOptions.railingWidth, bridgeOptions.railingHeight, L);
+    const railingsInstanced = new THREE.InstancedMesh(railingGeo, concreteMaterial, 2);
+    _dummy.position.set(W / 2 + bridgeOptions.railingWidth / 2, T + bridgeOptions.railingHeight / 2, 0);
+    _dummy.rotation.set(0, 0, 0);
+    _dummy.updateMatrix();
+    railingsInstanced.setMatrixAt(0, _dummy.matrix);
+    _dummy.position.set(-(W / 2 + bridgeOptions.railingWidth / 2), T + bridgeOptions.railingHeight / 2, 0);
+    _dummy.updateMatrix();
+    railingsInstanced.setMatrixAt(1, _dummy.matrix);
+    railingsInstanced.instanceMatrix.needsUpdate = true;
+    bridgeGroup.add(railingsInstanced);
+    bridgeGroup.add(createRailingLightsOnly(1, L, W, T, bridgeOptions.lightSpacing, lightOpts));
+    bridgeGroup.add(createRailingLightsOnly(-1, L, W, T, bridgeOptions.lightSpacing, lightOpts));
 
-    bridgeGroup.add(createRailing(1, L, W, T, concreteMaterial, bridgeOptions.railingHeight, bridgeOptions.railingWidth, bridgeOptions.lightSpacing, lightOpts));
-    bridgeGroup.add(createRailing(-1, L, W, T, concreteMaterial, bridgeOptions.railingHeight, bridgeOptions.railingWidth, bridgeOptions.lightSpacing, lightOpts));
+    // 3. Bases: one InstancedMesh for both cylinders, one for all four prongs
+    const cylGeo = createTaperedHexCylinder(bridgeOptions.radiusTop, bridgeOptions.radiusBottom, cylHeight);
+    const cylindersInstanced = new THREE.InstancedMesh(cylGeo, concreteMaterial, 2);
+    _dummy.position.set(0, -baseHeight + cylHeight / 2, L2);
+    _dummy.rotation.set(0, 0, 0);
+    _dummy.updateMatrix();
+    cylindersInstanced.setMatrixAt(0, _dummy.matrix);
+    _dummy.position.set(0, -baseHeight + cylHeight / 2, -L2);
+    _dummy.updateMatrix();
+    cylindersInstanced.setMatrixAt(1, _dummy.matrix);
+    cylindersInstanced.instanceMatrix.needsUpdate = true;
+    bridgeGroup.add(cylindersInstanced);
 
-    // 3. Bases at z = ±L/2
-    bridgeGroup.add(createBase(L2, bridgeOptions.baseHeight, bridgeOptions.cylHeight, W2, 0, concreteMaterial, bridgeOptions.radiusTop, bridgeOptions.radiusBottom, bridgeOptions.prongCrossX, bridgeOptions.prongCrossZ));
-    bridgeGroup.add(createBase(-L2, bridgeOptions.baseHeight, bridgeOptions.cylHeight, W2, 0, concreteMaterial, bridgeOptions.radiusTop, bridgeOptions.radiusBottom, bridgeOptions.prongCrossX, bridgeOptions.prongCrossZ));
+    const prongLength = Math.sqrt(W2 * W2 + riseY * riseY);
+    const prongGeo = new THREE.BoxGeometry(bridgeOptions.prongCrossX, prongLength, bridgeOptions.prongCrossZ);
+    const prongAngleR = Math.atan2(W2, riseY);
+    const prongAngleL = Math.atan2(-W2, riseY);
+    const prongsInstanced = new THREE.InstancedMesh(prongGeo, concreteMaterial, 4);
+    const prongY = cylTop + riseY / 2;
+    _dummy.position.set(W2 / 2, prongY, L2);
+    _dummy.rotation.z = -prongAngleR;
+    _dummy.updateMatrix();
+    prongsInstanced.setMatrixAt(0, _dummy.matrix);
+    _dummy.position.set(-W2 / 2, prongY, L2);
+    _dummy.rotation.z = -prongAngleL;
+    _dummy.updateMatrix();
+    prongsInstanced.setMatrixAt(1, _dummy.matrix);
+    _dummy.position.set(W2 / 2, prongY, -L2);
+    _dummy.rotation.z = -prongAngleR;
+    _dummy.updateMatrix();
+    prongsInstanced.setMatrixAt(2, _dummy.matrix);
+    _dummy.position.set(-W2 / 2, prongY, -L2);
+    _dummy.rotation.z = -prongAngleL;
+    _dummy.updateMatrix();
+    prongsInstanced.setMatrixAt(3, _dummy.matrix);
+    prongsInstanced.instanceMatrix.needsUpdate = true;
+    bridgeGroup.add(prongsInstanced);
 
     bridgeGroup.position.set(x, y, z);
     bridgeGroup.scale.setScalar(scale);

@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 
-// Shared flash materials: 80 phones use 2 materials instead of 80, reducing state churn.
+// Shared flash materials and geometry: all phones reuse these (no per-phone geometry allocation).
 const sharedFlashMatOff = new THREE.MeshStandardMaterial({
     color: 0x444444,
     emissive: 0x000000,
@@ -12,10 +12,13 @@ const sharedFlashMatOff = new THREE.MeshStandardMaterial({
 const sharedFlashMatOn = new THREE.MeshStandardMaterial({
     color: 0x444444,
     emissive: 0xffffdd,
-    emissiveIntensity: 2.5,
+    emissiveIntensity: 6,
     side: THREE.DoubleSide,
     toneMapped: false,
 });
+const SHARED_FLASH_WIDTH = 0.1;
+const SHARED_FLASH_HEIGHT = 0.06;
+const sharedFlashGeometry = new THREE.PlaneGeometry(SHARED_FLASH_WIDTH, SHARED_FLASH_HEIGHT);
 
 const DEFAULTS = {
     width: 0.7,
@@ -45,23 +48,21 @@ class Phone extends THREE.Group {
         const body = new THREE.Mesh(bodyGeo, bodyMat);
         this.add(body);
 
-        // Flash: small plane on the -Z face (screen/front when held—the side facing the viewer).
-        // Plane default normal is +Z; rotate by PI around Y so it faces -Z, and place just in front of -Z face.
-        // Uses sharedFlashMatOff; setFlashOn/setFlashOff swap to sharedFlashMatOn/Off.
-        const flashGeo = new THREE.PlaneGeometry(flashWidth, flashHeight);
-        const flashMesh = new THREE.Mesh(flashGeo, sharedFlashMatOff);
+        // Flash: shared geometry (no per-phone allocation). Scale if this phone's flash size differs.
+        const flashMesh = new THREE.Mesh(sharedFlashGeometry, sharedFlashMatOff);
         flashMesh.position.set(width / 4, height / 2 - 0.08, -depth / 2 - 0.008); // -Z face, clearly in front to avoid z-fight
         flashMesh.rotation.y = Math.PI; // face -Z (outward from the front of the phone)
+        flashMesh.scale.set(flashWidth / SHARED_FLASH_WIDTH, flashHeight / SHARED_FLASH_HEIGHT, 1);
         flashMesh.renderOrder = 1;      // draw after body to reduce z-fight
         this.add(flashMesh);
         this._flashMesh = flashMesh;
 
-        // Optional PointLight on the same -Z (front) face. Created but NOT added to scene;
-        // add in setFlashOn, remove in setFlashOff, so it is only in the scene while flashing.
+        // PointLight on the -Z (front) face. Always in the scene graph; we only toggle intensity so the renderer sees it.
         this._flashLight = null;
         if (flashLight) {
-            const light = new THREE.PointLight(0xffffdd, 0, 0, 20);
+            const light = new THREE.PointLight(0xffffdd, 0, 0, 2);
             light.position.set(width / 4, height / 2 - 0.08, -depth / 2 - 0.01);
+            this.add(light);
             this._flashLight = light;
         }
 
@@ -71,8 +72,7 @@ class Phone extends THREE.Group {
     setFlashOn() {
         this._flashMesh.material = sharedFlashMatOn;
         if (this._flashLight) {
-            if (!this.children.includes(this._flashLight)) this.add(this._flashLight);
-            this._flashLight.intensity = 1;
+            this._flashLight.intensity = 8;
         }
     }
 
@@ -80,7 +80,6 @@ class Phone extends THREE.Group {
         this._flashMesh.material = sharedFlashMatOff;
         if (this._flashLight) {
             this._flashLight.intensity = 0;
-            this.remove(this._flashLight);
         }
     }
 }

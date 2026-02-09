@@ -1,9 +1,10 @@
 import * as THREE from "three";
 
+const _dummy = new THREE.Object3D();
+
 /**
  * Create a staircase with cube-shaped steps and angled concrete side slabs.
- * Connects a start point (e.g. pavement edge) to an end point (e.g. bridge level).
- * Based on Dunelm House reference: concrete steps with large angled slabs on either side.
+ * Uses InstancedMesh for steps and slabs to minimise draw calls.
  *
  * @param {THREE.Vector3} startPos - Start point (pavement end)
  * @param {THREE.Vector3} endPos - End point (bridge level)
@@ -35,7 +36,6 @@ export function createStaircase(startPos, endPos, options = {}) {
     const dz = endPos.z - startPos.z;
     const pathLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
     const horizontalDist = Math.sqrt(dx * dx + dz * dz);
-    // Space step centers by stepDepth so each step abuts the next (no gaps)
     const numSteps = Math.max(1, Math.ceil(pathLength / stepDepth));
 
     const stepMaterial = new THREE.MeshStandardMaterial({ color: stepColor });
@@ -44,42 +44,44 @@ export function createStaircase(startPos, endPos, options = {}) {
     const yaw = Math.atan2(dx, dz);
     const direction = new THREE.Vector3(dx, dy, dz).divideScalar(pathLength);
 
-    // Create cube-shaped steps - each step center spaced by stepDepth along the path
+    // Steps: one InstancedMesh
     const stepGeo = new THREE.BoxGeometry(width, stepHeight, stepDepth);
+    const stepsInstanced = new THREE.InstancedMesh(stepGeo, stepMaterial, numSteps);
     for (let i = 0; i < numSteps; i++) {
         const dist = (i + 0.5) * stepDepth;
-        const step = new THREE.Mesh(stepGeo, stepMaterial);
-        step.position.copy(startPos).addScaledVector(direction, dist);
-        step.rotation.y = yaw;
-        group.add(step);
+        _dummy.position.copy(startPos).addScaledVector(direction, dist);
+        _dummy.rotation.y = yaw;
+        _dummy.updateMatrix();
+        stepsInstanced.setMatrixAt(i, _dummy.matrix);
     }
+    stepsInstanced.instanceMatrix.needsUpdate = true;
+    group.add(stepsInstanced);
 
-    // Side slabs: angled rectangles following the staircase
+    // Side slabs: one InstancedMesh (2 instances)
     const slopeAngle = Math.atan2(dy, horizontalDist);
     const slabLength = Math.sqrt(horizontalDist * horizontalDist + dy * dy);
     const slabGeo = new THREE.BoxGeometry(slabThickness, slabHeight, slabLength);
+    const slabsInstanced = new THREE.InstancedMesh(slabGeo, slabMaterial, 2);
 
     const midX = (startPos.x + endPos.x) / 2;
     const midY = (startPos.y + endPos.y) / 2;
     const midZ = (startPos.z + endPos.z) / 2;
     const offset = width / 2 + slabThickness / 2;
-    // Perpendicular to direction (dx, dz): left = (-dz, dx), right = (dz, -dx)
     const perpX = (-dz / horizontalDist) * offset;
     const perpZ = (dx / horizontalDist) * offset;
 
-    // Left slab
-    const leftSlab = new THREE.Mesh(slabGeo, slabMaterial);
-    leftSlab.position.set(midX + perpX, midY, midZ + perpZ);
-    leftSlab.rotation.y = yaw;
-    leftSlab.rotation.x = slopeAngle;
-    group.add(leftSlab);
+    _dummy.position.set(midX + perpX, midY, midZ + perpZ);
+    _dummy.rotation.y = yaw;
+    _dummy.rotation.x = slopeAngle;
+    _dummy.updateMatrix();
+    slabsInstanced.setMatrixAt(0, _dummy.matrix);
 
-    // Right slab
-    const rightSlab = new THREE.Mesh(slabGeo, slabMaterial);
-    rightSlab.position.set(midX - perpX, midY, midZ - perpZ);
-    rightSlab.rotation.y = yaw;
-    rightSlab.rotation.x = slopeAngle;
-    group.add(rightSlab);
+    _dummy.position.set(midX - perpX, midY, midZ - perpZ);
+    _dummy.updateMatrix();
+    slabsInstanced.setMatrixAt(1, _dummy.matrix);
+
+    slabsInstanced.instanceMatrix.needsUpdate = true;
+    group.add(slabsInstanced);
 
     return group;
 }

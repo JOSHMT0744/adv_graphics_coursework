@@ -75,7 +75,8 @@ function N(i, p, t, knots) {
  * @param {number[]} knotsV
  * @returns {THREE.Vector3}
  */
-function evalSurface(u, v, pU, pV, points, dimU, dimV, knotsU, knotsV) {
+let _evalSurfaceTemp = null;
+function evalSurface(u, v, pU, pV, points, dimU, dimV, knotsU, knotsV, target) {
     let x = 0, y = 0, z = 0;
     for (let i = 0; i < dimU; i++) {
         const bu = N(i, pU, u, knotsU);
@@ -93,6 +94,10 @@ function evalSurface(u, v, pU, pV, points, dimU, dimV, knotsU, knotsV) {
                 }
             }
         }
+    }
+    if (target) {
+        target.set(x, y, z);
+        return target;
     }
     return new THREE.Vector3(x, y, z);
 }
@@ -256,24 +261,26 @@ export function createBSplineSurface(controlPoints, options = {}) {
  * Use this to animate the surface by mutating the points and calling this each frame.
  * @param {THREE.Group} group - Group returned by createBSplineSurface (must have userData.bspline with re-eval params)
  * @param {THREE.Vector3[]|Array} points - Flat array of dimU*dimV control points (will be read, not cloned)
+ * @param {boolean} [skipNormals=false] - If true, skip computeVertexNormals (e.g. for invisible/transparent surfaces)
  */
-export function updateBSplineSurfaceFromPoints(group, points) {
+export function updateBSplineSurfaceFromPoints(group, points, skipNormals = false) {
     const data = group.userData.bspline;
     if (!data?.surfaceMesh || !data.knotsU || !data.knotsV) return;
     const { surfaceMesh, knotsU, knotsV, pU, pV, dimU, dimV, startU, endU, startV, endV } = data;
     const geo = surfaceMesh.geometry;
     const positions = geo.attributes.position;
     const uvAttr = geo.attributes.uv;
+    if (!_evalSurfaceTemp) _evalSurfaceTemp = new THREE.Vector3();
     for (let k = 0; k < positions.count; k++) {
         const uRaw = uvAttr.getX(k);
         const vRaw = uvAttr.getY(k);
         const u = startU + uRaw * (endU - startU);
         const v = startV + vRaw * (endV - startV);
-        const pt = evalSurface(u, v, pU, pV, points, dimU, dimV, knotsU, knotsV);
-        positions.setXYZ(k, pt.x, pt.y, pt.z);
+        evalSurface(u, v, pU, pV, points, dimU, dimV, knotsU, knotsV, _evalSurfaceTemp);
+        positions.setXYZ(k, _evalSurfaceTemp.x, _evalSurfaceTemp.y, _evalSurfaceTemp.z);
     }
     positions.needsUpdate = true;
-    geo.computeVertexNormals();
+    if (!skipNormals) geo.computeVertexNormals();
 }
 
 /**
@@ -292,9 +299,8 @@ export function getBSplineSurfaceWorldPointAtNormalized(group, points, uNorm, vN
     const { knotsU, knotsV, pU, pV, dimU, dimV, startU, endU, startV, endV } = data;
     const u = startU + uNorm * (endU - startU);
     const v = startV + vNorm * (endV - startV);
-    const localPt = evalSurface(u, v, pU, pV, points, dimU, dimV, knotsU, knotsV);
     const out = target || new THREE.Vector3();
-    out.copy(localPt);
+    evalSurface(u, v, pU, pV, points, dimU, dimV, knotsU, knotsV, out);
     group.localToWorld(out);
     return out;
 }

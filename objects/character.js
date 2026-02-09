@@ -314,6 +314,7 @@ export class Figure {
         const height = 3.1; // match figure height (body -0.75 to 2.35)
         const geo = new THREE.BoxGeometry(1, height, 1);
         geo.translate(0, height / 2, 0); // bottom at y=0
+        Figure.addSkinPartAttribute(geo, []); // no skin parts, all body
         return geo;
     }
 
@@ -378,6 +379,79 @@ export class Figure {
     }
 
     /**
+     * Add skinPart vertex attribute: 0 = torso/legs (torsoColor), 1 = head/arms (skinColor). Used for shader color blending.
+     * @param {THREE.BufferGeometry} geo - Merged geometry
+     * @param {number[]} skinPartIndices - Indices of parts that are skin: head and arms. Parts: 0=body, 1=head, 2=legL, 3=legR, 4=armL, 5=armR.
+     */
+    static addSkinPartAttribute(geo, skinPartIndices) {
+        const vertsPerBox = 24;
+        const count = geo.attributes.position.count;
+        const arr = new Float32Array(count);
+        for (let i = 0; i < count; i++) {
+            const partIdx = Math.floor(i / vertsPerBox);
+            arr[i] = skinPartIndices.includes(partIdx) ? 1.0 : 0.0;
+        }
+        geo.setAttribute('skinPart', new THREE.BufferAttribute(arr, 1));
+    }
+
+    /**
+     * Medium-LOD geometry for instanced characters: body + head only (no arms/legs). Origin at feet (y=0).
+     * @returns {THREE.BufferGeometry}
+     */
+    static getInstanceGeometryMedium() {
+        const bodyGeo = new THREE.BoxGeometry(1, 1.5, 1);
+        bodyGeo.translate(0, 0.75, 0);
+        const headGeo = new THREE.BoxGeometry(1.4, 1.4, 1.4);
+        headGeo.translate(0, 1.65, 0);
+        const merged = mergeGeometries([bodyGeo, headGeo]);
+        bodyGeo.dispose();
+        headGeo.dispose();
+        Figure.addSkinPartAttribute(merged, [1]); // part 1 = head (arms not present in medium LOD)
+        return merged;
+    }
+
+    /**
+     * High-LOD geometry for instancing (single material; use instance color for variation).
+     * Same as getInstanceGeometryHigh but returns only geometry, no materials.
+     * Parts: 0=body, 1=head, 2=legL, 3=legR, 4=armL, 5=armR.
+     */
+    static getInstanceGeometryHighOnly() {
+        const bodyGeo = new THREE.BoxGeometry(1, 1.5, 1);
+        bodyGeo.translate(0, 0.75, 0);
+        const headGeo = new THREE.BoxGeometry(1.4, 1.4, 1.4);
+        headGeo.translate(0, 1.65, 0);
+        const legHeight = 0.75;
+        const legGeo = new THREE.BoxGeometry(0.28, legHeight, 0.28);
+        legGeo.translate(0, -legHeight / 2, 0);
+        const legLeft = legGeo.clone();
+        legLeft.applyMatrix4(new THREE.Matrix4().makeTranslation(-0.36, legHeight / 2, 0));
+        const legRight = legGeo.clone();
+        legRight.applyMatrix4(new THREE.Matrix4().makeTranslation(0.36, legHeight / 2, 0));
+        legGeo.dispose();
+        const armHeight = 1;
+        const armGeo = new THREE.BoxGeometry(0.25, armHeight, 0.25);
+        armGeo.translate(0, -armHeight / 2, 0);
+        const armLeft = armGeo.clone();
+        armLeft.applyMatrix4(
+            new THREE.Matrix4().makeTranslation(0.625, 1.1, 0).multiply(new THREE.Matrix4().makeRotationZ(Math.PI / 12))
+        );
+        const armRight = armGeo.clone();
+        armRight.applyMatrix4(
+            new THREE.Matrix4().makeTranslation(-0.625, 1.1, 0).multiply(new THREE.Matrix4().makeRotationZ(-Math.PI / 12))
+        );
+        armGeo.dispose();
+        const merged = mergeGeometries([bodyGeo, headGeo, legLeft, legRight, armLeft, armRight]);
+        bodyGeo.dispose();
+        headGeo.dispose();
+        legLeft.dispose();
+        legRight.dispose();
+        armLeft.dispose();
+        armRight.dispose();
+        Figure.addSkinPartAttribute(merged, [1, 4, 5]); // parts 1=head, 4=armL, 5=armR = skin; 0=body, 2=legL, 3=legR = torso
+        return merged;
+    }
+
+    /**
      * Default material for instanced characters (single color; per-instance color can be set on InstancedMesh).
      * @returns {THREE.Material}
      */
@@ -405,10 +479,112 @@ export class CrowdCharacter {
     }
 }
 
+// Shared geometries and material palette for crowd LOD (efficiency: fewer allocations, material batching)
+let _sharedGeoBody = null, _sharedGeoHead = null, _sharedGeoArm = null, _sharedGeoLeg = null;
+function getSharedGeoBody() {
+    if (!_sharedGeoBody) _sharedGeoBody = new THREE.BoxGeometry(1, 1.5, 1);
+    return _sharedGeoBody;
+}
+function getSharedGeoHead() {
+    if (!_sharedGeoHead) _sharedGeoHead = new THREE.BoxGeometry(1.4, 1.4, 1.4);
+    return _sharedGeoHead;
+}
+function getSharedGeoArm() {
+    if (!_sharedGeoArm) _sharedGeoArm = new THREE.BoxGeometry(0.25, 1, 0.25);
+    return _sharedGeoArm;
+}
+function getSharedGeoLeg() {
+    if (!_sharedGeoLeg) {
+        _sharedGeoLeg = new THREE.BoxGeometry(0.28, 0.75, 0.28);
+        _sharedGeoLeg.translate(0, -0.375, 0); // hip at y=0, leg extends down to y=-0.75 (feet)
+    }
+    return _sharedGeoLeg;
+}
+
+let _skinMaterials = null, _bodyMaterials = null;
+function getSkinMaterial(i) {
+    if (!_skinMaterials) _skinMaterials = COLOURS.SKIN_PALETTE.map(c => new THREE.MeshStandardMaterial({ color: c }));
+    return _skinMaterials[i % _skinMaterials.length];
+}
+function getBodyMaterial(i) {
+    if (!_bodyMaterials) _bodyMaterials = COLOURS.BODY_PALETTE.map(c => new THREE.MeshStandardMaterial({ color: c }));
+    return _bodyMaterials[i % _bodyMaterials.length];
+}
+/** Materials used by crowd (for wireframe toggle). */
+export function getCrowdMaterials() {
+    if (!_skinMaterials) getSkinMaterial(0);
+    if (!_bodyMaterials) getBodyMaterial(0);
+    return [..._skinMaterials, ..._bodyMaterials];
+}
+
+/**
+ * Build high-detail character mesh (body, head, arms, legs, optional phone).
+ * Shared by createPerson and createPersonMeshOnly. Uses shared geometries and material palette.
+ * @param {{ position?: THREE.Vector3, rotationY?: number }} options
+ * @returns {{ mesh: THREE.Group, parts: Object, _phone: object|null }}
+ */
+function buildPersonMesh(options = {}) {
+    const position = options.position || new THREE.Vector3(0, 0, 0);
+    const rotationY = options.rotationY ?? 0;
+    const mesh = new THREE.Group();
+    let _phone = null;
+
+    const matSkin = getSkinMaterial(Math.floor(Math.random() * COLOURS.SKIN_PALETTE.length));
+    const matBody = getBodyMaterial(Math.floor(Math.random() * COLOURS.BODY_PALETTE.length));
+
+    const legHeight = 0.75;
+    const torsoHeight = 1;
+    const torsoBottom = legHeight; // legs end at y=0.75, torso starts there
+    const torsoCenter = torsoBottom + torsoHeight / 2;
+
+    const torso = new THREE.Mesh(getSharedGeoBody(), matBody);
+    torso.position.set(0, torsoCenter, 0); // torso y in [0.75, 2.25], above legs [0, 0.75]
+
+    const head = new THREE.Mesh(getSharedGeoHead(), matSkin);
+    head.position.set(0, torsoCenter + torsoHeight / 2 + 0.7, 0); // on top of torso (head 1.4 tall)
+
+    const legLeft = new THREE.Mesh(getSharedGeoLeg(), matBody);
+    legLeft.position.set(-0.36, legHeight, 0); // hip at y=0.75 (meets torso bottom)
+    const legRight = new THREE.Mesh(getSharedGeoLeg(), matBody);
+    legRight.position.set(0.36, legHeight, 0);
+
+    const armHeight = 1;
+    const shoulderY = torsoCenter + torsoHeight / 2 - 0.2; // just below torso top
+    const armLeftMesh = new THREE.Mesh(getSharedGeoArm(), matBody);
+    armLeftMesh.position.set(0.625, shoulderY - armHeight / 2, 0);
+    armLeftMesh.rotation.z = Math.PI / 12;
+    const armLeft = new THREE.Group();
+    armLeft.add(armLeftMesh);
+
+    const armRightMesh = new THREE.Mesh(getSharedGeoArm(), matBody);
+    armRightMesh.position.set(-0.625, shoulderY - armHeight / 2, 0);
+    armRightMesh.rotation.z = -Math.PI / 12;
+    const armRight = new THREE.Group();
+    armRight.add(armRightMesh);
+
+    if (Math.random() < 0.9) {
+        const phone = createPhone(0, 0, 0, { width: 0.36, height: 0.72, depth: 0.06, flashLight: false });
+        phone.position.set(0, -0.5 + 0.24 / 2, 0.14);
+        phone.rotation.x = Math.PI / 2;
+        phone.rotation.y = Math.PI / 2;
+        _phone = phone;
+        armRightMesh.add(phone);
+    }
+
+    mesh.add(torso, head, legLeft, legRight, armLeft, armRight);
+    mesh.position.copy(position);
+    mesh.rotation.y = rotationY;
+    mesh.traverse(c => c.castShadow = false);
+
+    const parts = { legLeft: legLeft, legRight: legRight, armLeft: armLeftMesh, armRight: armRightMesh, torso: torso, head: head };
+    return { mesh, parts, _phone };
+}
+
 export function createPerson(options = {}) {
     const position = options.position;
     const pos = position ? position.clone() : new THREE.Vector3((Math.random() - 0.5) * 120, 0, (Math.random() - 0.5) * 120);
     const rotationY = position ? (options.rotationY ?? Math.random() * Math.PI * 2) : Math.random() * Math.PI * 2;
+    const { mesh, parts, _phone } = buildPersonMesh({ position: pos, rotationY });
     const person = {
         pos,
         prevPosition: position ? position.clone() : pos.clone(),
@@ -417,75 +593,25 @@ export function createPerson(options = {}) {
         acc: new THREE.Vector3(),
         state: 'WANDER', target: null, timer: 0,
         maxSpeed: MAX_SPEED * (0.9 + Math.random() * 0.2),
-        mesh: new THREE.Group(),
-        _phone: null
+        mesh,
+        _phone,
+        parts
     };
-
-    const skin = [0xFFDBAC, 0xF1C27D, 0xE0AC69, 0x8D5524][Math.floor(Math.random() * 4)];
-    const matSkin = new THREE.MeshStandardMaterial({ color: skin });
-    const matBody = new THREE.MeshStandardMaterial({color: COLOURS.CLOTHES})
-
-    const torso = new THREE.Mesh(new THREE.BoxGeometry(1, 1.5, 1), matBody);
-    torso.position.set(0, 0.75, 0);
-
-    const head = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.4, 1.4), matSkin);
-    head.position.set(0, 1.65, 0);
-
-    // Legs: limb technique — box, translate so centre at origin, then position (reference style)
-    const legHeight = 0.75;
-    const legGeo = new THREE.Mesh(new THREE.BoxGeometry(0.28, legHeight, 0.28), matBody);
-    legGeo.position.set(0, -legHeight / 2, 0);
-    const legLeft = legGeo.clone();
-    legLeft.applyMatrix4(new THREE.Matrix4().makeTranslation(-0.36, legHeight / 2, 0));
-    const legRight = legGeo.clone();
-    legRight.applyMatrix4(new THREE.Matrix4().makeTranslation(0.36, legHeight / 2, 0));
-
-    // Arms: same limb technique — use Group so arm mesh + phone children render correctly (match Figure structure)
-    const armHeight = 1;
-    const armGeo = new THREE.BoxGeometry(0.25, armHeight, 0.25);
-    const armLeftMesh = new THREE.Mesh(armGeo, matBody);
-    armLeftMesh.position.set(0.625, 1.1 - armHeight / 2, 0);
-    armLeftMesh.rotation.z = Math.PI / 12;
-    const armLeft = new THREE.Group();
-    armLeft.add(armLeftMesh);
-
-    const armRightMesh = new THREE.Mesh(armGeo.clone(), matBody);
-    armRightMesh.position.set(-0.625, 1.1 - armHeight / 2, 0);
-    armRightMesh.rotation.z = -Math.PI / 12;
-    const armRight = new THREE.Group();
-    armRight.add(armRightMesh);
-
-    if (Math.random() < 0.9) {
-        const phone = createPhone(0, 0, 0, { width: 0.36, height: 0.72, depth: 0.06, flashLight: false });
-        // Place phone at arm's hand (bottom of arm) in armRightMesh local space; z offset to avoid z-fight
-        phone.position.set(0, -0.5 + 0.24 / 2, 0.14);
-        phone.rotation.x = Math.PI / 2;
-        phone.rotation.y = Math.PI / 2;
-        person._phone = phone;
-        armRightMesh.add(phone);
-    }
-
-    person.mesh.add(torso, head, legLeft, legRight, armLeft, armRight);
-    person.parts = {
-        legLeft, legRight, armLeft: armLeftMesh, armRight: armRightMesh, torso, head,
-         lArmMat: armLeftMesh.material, rArmMat: armRightMesh.material
-        };
-
-    person.getPhone = function () {
-        return this._phone || null;
-    };
+    person.getPhone = function () { return this._phone || null; };
     person.triggerFlash = function () {
         const phone = this.getPhone();
-        if (phone) {
-            phone.setFlashOn();
-            setTimeout(() => phone.setFlashOff(), 500);
-        }
+        if (phone) { phone.setFlashOn(); setTimeout(() => phone.setFlashOff(), 500); }
     };
-
-    person.mesh.traverse(c => c.castShadow = true);
-
-    // add to scene here?
     return person;
+}
+
+/**
+ * Create mesh/parts only for high-detail character. Used when promoting crowd person to close range.
+ * @param {{ position?: THREE.Vector3, rotationY?: number }} options
+ * @returns {{ mesh: THREE.Group, parts: Object, _phone: object|null }}
+ */
+export function createPersonMeshOnly(options = {}) {
+    return buildPersonMesh(options);
 }
 
 /** Distance thresholds for LOD levels (camera distance). */
@@ -494,44 +620,57 @@ export const LOD_DISTANCE_MED = 40;   // medium: torso + head + arms
 export const LOD_DISTANCE_LOW = 70;   // far: torso + head only (current medium format)
 export const LOD_DISTANCE_BOX = 100;  // single box
 
+// High-detail total height (feet at 0 to top of head): legs 0.75 + torso overlap + head; head top = 1.25+0.5+0.7+0.7 = 3.15
+const FIGURE_TOTAL_HEIGHT = 3.15;
+
 /**
- * Medium-detail mesh: torso + head + arms (characters still have arms).
+ * Medium-detail mesh: torso + head + arms (no legs). Offset and scaled so height matches high-detail (feet at y=0, same total height).
  * @param {THREE.Material} matSkin - material for head
  * @param {THREE.Material} matBody - material for torso and arms
  * @returns {THREE.Group}
  */
 function createMediumDetailMesh(matSkin, matBody) {
     const group = new THREE.Group();
-    const torso = new THREE.Mesh(new THREE.BoxGeometry(1, 1.5, 1), matBody);
-    torso.position.set(0, 0.75, 0);
-    const head = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.4, 1.4), matSkin);
-    head.position.set(0, 1.65, 0);
+    const legHeight = 0.75;
+    const torsoHeight = 1;
+    const torsoCenter = legHeight + torsoHeight / 2;
+    const shoulderY = torsoCenter + torsoHeight / 2 - 0.2;
     const armHeight = 1;
-    const armGeo = new THREE.BoxGeometry(0.25, armHeight, 0.25);
-    armGeo.translate(0, -armHeight / 2, 0);
-    const armLeft = new THREE.Mesh(armGeo, matBody);
-    armLeft.position.set(0.625, 1.1, 0);
+    const torso = new THREE.Mesh(getSharedGeoBody(), matBody);
+    torso.position.set(0, torsoCenter, 0);
+    const head = new THREE.Mesh(getSharedGeoHead(), matSkin);
+    head.position.set(0, torsoCenter + torsoHeight / 2 + 0.7, 0);
+    const armLeft = new THREE.Mesh(getSharedGeoArm(), matBody);
+    armLeft.position.set(0.625, shoulderY - armHeight / 2, 0);
     armLeft.rotation.z = Math.PI / 12;
-    const armRight = new THREE.Mesh(armGeo.clone(), matBody);
-    armRight.position.set(-0.625, 1.1, 0);
+    const armRight = new THREE.Mesh(getSharedGeoArm(), matBody);
+    armRight.position.set(-0.625, shoulderY - armHeight / 2, 0);
     armRight.rotation.z = -Math.PI / 12;
-    group.add(torso, head, armLeft, armRight);
+    const inner = new THREE.Group();
+    inner.add(torso, head, armLeft, armRight);
+    // Medium mesh bottom is torso bottom at 0.5; shift down so feet plane is at 0 (match high-detail)
+    inner.position.y += 0.75;
+    // Medium mesh height without legs is 2.65; scale to match high-detail total height
+    group.add(inner);
     group.traverse(c => c.castShadow = false);
     return group;
 }
 
 /**
- * Far (low) detail mesh: torso + head only (format of previous medium).
+ * Far (low) detail mesh: torso + head only (shared geometry).
  * @param {THREE.Material} matSkin - material for head
  * @param {THREE.Material} matBody - material for torso
  * @returns {THREE.Group}
  */
 function createFarDetailMesh(matSkin, matBody) {
     const group = new THREE.Group();
-    const torso = new THREE.Mesh(new THREE.BoxGeometry(1, 1.5, 1), matBody);
-    torso.position.set(0, 0.75, 0);
-    const head = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.4, 1.4), matSkin);
-    head.position.set(0, 1.65, 0);
+    const legHeight = 0.75;
+    const torsoHeight = 1;
+    const torsoCenter = legHeight + torsoHeight / 2;
+    const torso = new THREE.Mesh(getSharedGeoBody(), matBody);
+    torso.position.set(0, torsoCenter, 0);
+    const head = new THREE.Mesh(getSharedGeoHead(), matSkin);
+    head.position.set(0, torsoCenter + torsoHeight / 2 + 0.7, 0);
     group.add(torso, head);
     group.traverse(c => c.castShadow = false);
     return group;
@@ -574,5 +713,39 @@ export function createPersonWithLOD(options = {}) {
     lod.addLevel(farMesh, LOD_DISTANCE_LOW);
     lod.addLevel(boxMesh, LOD_DISTANCE_BOX);
     person.mesh = lod;
+    return person;
+}
+
+/**
+ * Create crowd person data for instanced rendering (no mesh). Has pos, vel, bounds, bodyColor, facingAngle.
+ * getPhone() returns null; triggerFlash() is no-op.
+ */
+export function createCrowdPerson(options = {}) {
+    const position = options.position;
+    const pos = position ? position.clone() : new THREE.Vector3((Math.random() - 0.5) * 120, 0, (Math.random() - 0.5) * 120);
+    const rotationY = position ? (options.rotationY ?? Math.random() * Math.PI * 2) : Math.random() * Math.PI * 2;
+    const hue = Math.random() * 360;
+    const bodyColor = new THREE.Color().setHSL(hue / 360, 0.6, 0.62);
+    const person = {
+        pos,
+        prevPosition: position ? position.clone() : pos.clone(),
+        rotationY,
+        facingAngle: rotationY,
+        bankAngle: 0,
+        vel: new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5),
+        acc: new THREE.Vector3(),
+        state: 'WANDER',
+        target: null,
+        timer: 0,
+        maxSpeed: MAX_SPEED * (0.9 + Math.random() * 0.2),
+        mesh: null,
+        parts: null,
+        bounds: null,
+        bodyColor,
+        getPhone: () => null,
+        triggerFlash: () => {},
+        _surfaceCache: { regionIndex: 0 },
+        _lastOctreePos: position ? position.clone() : pos.clone()
+    };
     return person;
 }
