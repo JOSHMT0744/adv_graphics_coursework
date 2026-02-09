@@ -141,8 +141,16 @@ const RECESS = 0.03;
 const WINDOW_FACE_OFFSET = 0.002;
 const _windowDummy = new THREE.Object3D();
 
+let _sharedWindowPlaneGeometry = null;
+/** Single shared geometry for all window instances (unit plane; scale is in instance matrix). */
+function getSharedWindowPlaneGeometry() {
+    if (!_sharedWindowPlaneGeometry) _sharedWindowPlaneGeometry = new THREE.PlaneGeometry(0.6, 1);
+    return _sharedWindowPlaneGeometry;
+}
+
 /**
  * Add a grid of window planes on one face of a block as one InstancedMesh.
+ * Uses shared unit-plane geometry; per-window size and position are in the instance matrix.
  * @param {THREE.Group} parentGroup - Block group to add windows to.
  * @param {string} face - 'front'|'back'
  * @param {number} blockW - block width (X)
@@ -168,7 +176,7 @@ function addWindowGrid(parentGroup, face, blockW, blockH, blockD, countX, countY
     const stepX = sizeW / (countX + 1), stepY = sizeH / (countY + 1);
     const winW = Math.max(0.08, stepX * 0.85), winH = Math.max(0.15, stepY * 0.85);
     const count = countX * countY;
-    const geo = new THREE.PlaneGeometry(winW, winH);
+    const geo = getSharedWindowPlaneGeometry();
     const instanced = new THREE.InstancedMesh(geo, windowMaterial, count);
     instanced.renderOrder = 1;
     instanced.layers.set(1);
@@ -183,7 +191,8 @@ function addWindowGrid(parentGroup, face, blockW, blockH, blockD, countX, countY
             pos.add(normal.clone().multiplyScalar(WINDOW_FACE_OFFSET));
 
             _windowDummy.position.copy(pos);
-            _windowDummy.rotation.y = rotY;
+            _windowDummy.quaternion.setFromEuler(0, rotY, 0);
+            _windowDummy.scale.set(winW, winH, 1);
             _windowDummy.updateMatrix();
             instanced.setMatrixAt(idx++, _windowDummy.matrix);
         }
@@ -209,7 +218,7 @@ function createBlock(w, h, d, windowCounts = {}, windowMaterial = getDefaultWind
     const g = new THREE.Group();
     const box = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), concreteMat);
     g.add(box);
-    const minWindows = [2, 2];
+    const minWindows = [2, 1];
     addWindowGrid(g, 'front', w, h, d, (windowCounts.front || minWindows)[0], (windowCounts.front || minWindows)[1], RECESS, wFront);
     addWindowGrid(g, 'back',  w, h, d, (windowCounts.back || minWindows)[0],  (windowCounts.back || minWindows)[1],  RECESS, wBack);
     return g;

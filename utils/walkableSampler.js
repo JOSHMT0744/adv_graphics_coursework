@@ -430,19 +430,27 @@ export function createCombinedSampler(regions, options = {}) {
         numZ = Math.max(1, Math.ceil((gridMaxZ - gridMinZ) / cellSize));
         heightGrid = new Float64Array(numX * numZ);
         heightGrid.fill(HEIGHT_GRID_SENTINEL);
+        // Sample multiple points per cell (center + 4 corners) so partially covered cells get a valid height
+        const cellSamples = [
+            { u: 0.5, v: 0.5 },   // center
+            { u: 0, v: 0 }, { u: 1, v: 0 }, { u: 0, v: 1 }, { u: 1, v: 1 }  // corners
+        ];
         for (let i = 0; i < numX; i++) {
-            const x = gridMinX + (i + 0.5) * cellSize;
             for (let j = 0; j < numZ; j++) {
-                const z = gridMinZ + (j + 0.5) * cellSize;
-                for (let ri = 0; ri < regions.length; ri++) {
-                    const r = regions[ri];
-                    if (r.contains && r.contains(x, z)) {
-                        const y = r.getY ? r.getY(x, z) : null;
-                        if (y != null) {
-                            heightGrid[i * numZ + j] = y;
-                            break;
+                for (const s of cellSamples) {
+                    const x = gridMinX + (i + s.u) * cellSize;
+                    const z = gridMinZ + (j + s.v) * cellSize;
+                    for (let ri = 0; ri < regions.length; ri++) {
+                        const r = regions[ri];
+                        if (r.contains && r.contains(x, z)) {
+                            const y = r.getY ? r.getY(x, z) : null;
+                            if (y != null) {
+                                heightGrid[i * numZ + j] = y;
+                                break;
+                            }
                         }
                     }
+                    if (heightGrid[i * numZ + j] === heightGrid[i * numZ + j]) break; // valid (not NaN)
                 }
             }
         }
@@ -460,31 +468,47 @@ export function createCombinedSampler(regions, options = {}) {
             return regions[i].sample();
         },
         getSurfaceInfo(x, z, cache) {
+            let cellIx = -1, cellIz = -1;
             if (heightGrid) {
                 const fx = (x - gridMinX) / cellSize;
                 const fz = (z - gridMinZ) / cellSize;
-                const ix = Math.floor(fx);
-                const iz = Math.floor(fz);
-                const ix1 = ix + 1;
-                const iz1 = iz + 1;
-                const y00 = getCellY(ix, iz);
-                const y10 = getCellY(ix1, iz);
-                const y01 = getCellY(ix, iz1);
+                cellIx = Math.floor(fx);
+                cellIz = Math.floor(fz);
+                // Same-cell cache: avoid re-query when agent hasn't left the grid cell
+                if (cache && typeof cache.cellIx === 'number' && typeof cache.cellIz === 'number' && cache.cellIx === cellIx && cache.cellIz === cellIz) {
+                    return { inside: !!cache.inside, y: cache.y != null ? cache.y : null };
+                }
+                const ix1 = cellIx + 1;
+                const iz1 = cellIz + 1;
+                const y00 = getCellY(cellIx, cellIz);
+                const y10 = getCellY(ix1, cellIz);
+                const y01 = getCellY(cellIx, iz1);
                 const y11 = getCellY(ix1, iz1);
                 const allValid = y00 === y00 && y10 === y10 && y01 === y01 && y11 === y11;
                 if (allValid) {
-                    const tx = Math.max(0, Math.min(1, fx - ix));
-                    const tz = Math.max(0, Math.min(1, fz - iz));
+                    const tx = Math.max(0, Math.min(1, fx - cellIx));
+                    const tz = Math.max(0, Math.min(1, fz - cellIz));
                     const y = (1 - tx) * (1 - tz) * y00 + tx * (1 - tz) * y10 + (1 - tx) * tz * y01 + tx * tz * y11;
+                    if (cache) { cache.cellIx = cellIx; cache.cellIz = cellIz; cache.inside = true; cache.y = y; }
                     return { inside: true, y };
                 }
+                // Single-cell fallback: primary cell has valid height => use it (avoids region iteration at edges)
+                const yCell = getCellY(cellIx, cellIz);
+                if (yCell === yCell) {
+                    if (cache) { cache.cellIx = cellIx; cache.cellIz = cellIz; cache.inside = true; cache.y = yCell; }
+                    return { inside: true, y: yCell };
+                }
+                if (cache) { cache.cellIx = cellIx; cache.cellIz = cellIz; cache.inside = false; cache.y = null; }
             }
             const cachedIdx = (cache && typeof cache.regionIndex === 'number' && cache.regionIndex >= 0 && cache.regionIndex < regions.length) ? cache.regionIndex : -1;
             if (cachedIdx >= 0) {
                 const r = regions[cachedIdx];
                 if (r.contains && r.contains(x, z)) {
                     const y = r.getY ? r.getY(x, z) : null;
-                    if (y != null) return { inside: true, y };
+                    if (y != null) {
+                        if (cache) { cache.regionIndex = cachedIdx; cache.cellIx = cellIx; cache.cellIz = cellIz; cache.inside = true; cache.y = y; }
+                        return { inside: true, y };
+                    }
                 }
             }
             for (let i = 0; i < regions.length; i++) {
@@ -492,11 +516,12 @@ export function createCombinedSampler(regions, options = {}) {
                 if (r.contains && r.contains(x, z)) {
                     const y = r.getY ? r.getY(x, z) : null;
                     if (y != null) {
-                        if (cache) cache.regionIndex = i;
+                        if (cache) { cache.regionIndex = i; cache.cellIx = cellIx; cache.cellIz = cellIz; cache.inside = true; cache.y = y; }
                         return { inside: true, y };
                     }
                 }
             }
+            if (cache) { cache.cellIx = cellIx; cache.cellIz = cellIz; cache.inside = false; cache.y = null; }
             return { inside: false, y: null };
         }
     };

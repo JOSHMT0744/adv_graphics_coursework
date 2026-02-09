@@ -490,7 +490,10 @@ function getSharedGeoHead() {
     return _sharedGeoHead;
 }
 function getSharedGeoArm() {
-    if (!_sharedGeoArm) _sharedGeoArm = new THREE.BoxGeometry(0.25, 1, 0.25);
+    if (!_sharedGeoArm) {
+        _sharedGeoArm = new THREE.BoxGeometry(0.25, 1, 0.25);
+        _sharedGeoArm.translate(0, -0.5, 0); // shoulder at y=0, arm extends down to y=-1 (rotates at shoulder joint)
+    }
     return _sharedGeoArm;
 }
 function getSharedGeoLeg() {
@@ -551,20 +554,20 @@ function buildPersonMesh(options = {}) {
     const armHeight = 1;
     const shoulderY = torsoCenter + torsoHeight / 2 - 0.2; // just below torso top
     const armLeftMesh = new THREE.Mesh(getSharedGeoArm(), matBody);
-    armLeftMesh.position.set(0.625, shoulderY - armHeight / 2, 0);
+    armLeftMesh.position.set(0.625, shoulderY, 0); // shoulder at y=0 in geometry, so position mesh at shoulderY
     armLeftMesh.rotation.z = Math.PI / 12;
     const armLeft = new THREE.Group();
     armLeft.add(armLeftMesh);
 
     const armRightMesh = new THREE.Mesh(getSharedGeoArm(), matBody);
-    armRightMesh.position.set(-0.625, shoulderY - armHeight / 2, 0);
+    armRightMesh.position.set(-0.625, shoulderY, 0); // shoulder at y=0 in geometry, so position mesh at shoulderY
     armRightMesh.rotation.z = -Math.PI / 12;
     const armRight = new THREE.Group();
     armRight.add(armRightMesh);
 
     if (Math.random() < 0.9) {
         const phone = createPhone(0, 0, 0, { width: 0.36, height: 0.72, depth: 0.06, flashLight: false });
-        phone.position.set(0, -0.5 + 0.24 / 2, 0.14);
+        phone.position.set(0, -1 + 0.24 / 2, 0.14); // hand end at y=-1, phone positioned near hand
         phone.rotation.x = Math.PI / 2;
         phone.rotation.y = Math.PI / 2;
         _phone = phone;
@@ -641,10 +644,10 @@ function createMediumDetailMesh(matSkin, matBody) {
     const head = new THREE.Mesh(getSharedGeoHead(), matSkin);
     head.position.set(0, torsoCenter + torsoHeight / 2 + 0.7, 0);
     const armLeft = new THREE.Mesh(getSharedGeoArm(), matBody);
-    armLeft.position.set(0.625, shoulderY - armHeight / 2, 0);
+    armLeft.position.set(0.625, shoulderY, 0); // shoulder at y=0 in geometry, so position mesh at shoulderY
     armLeft.rotation.z = Math.PI / 12;
     const armRight = new THREE.Mesh(getSharedGeoArm(), matBody);
-    armRight.position.set(-0.625, shoulderY - armHeight / 2, 0);
+    armRight.position.set(-0.625, shoulderY, 0); // shoulder at y=0 in geometry, so position mesh at shoulderY
     armRight.rotation.z = -Math.PI / 12;
     const inner = new THREE.Group();
     inner.add(torso, head, armLeft, armRight);

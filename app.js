@@ -16,6 +16,8 @@ import { createBezierSurface, createDraggableBezierSurface, evalBezierSurface } 
 import { createBSplineSurface, createDraggableBSplineSurface, updateBSplineSurfaceFromPoints, getBSplineSurfaceWorldPointAtNormalized } from './objects/bsplineSurface.js';
 import { getTexture } from './utils/getTexture.js';
 import { Octree, createOctreeDebugLines } from './utils/Octree.js';
+import { createDragonfly, getDragonflyGeometry, getDragonflyGeometryLOD, getDragonflyMaterial } from './objects/dragonfly.js';
+import { createNavigationGrid, findPath } from './utils/astar.js';
 import {
     createBezierSampler,
     createBSplineSampler,
@@ -133,6 +135,13 @@ const PARAMS = {
         selectedCurve: 'None',
         addBezierSurface: null, // will be set later
         saveCoordinates: null // will be set later
+    },
+    // Dragonflies
+    dragonflies: {
+        count: 20,
+        followCursor: false,
+        maxSpeed: 0.35,
+        maxForce: 0.04
     }
 };
 
@@ -243,6 +252,17 @@ window.addEventListener('keyup', (e) => {
         case "ArrowUp": controls.direction.forward = false; break;
         case "ArrowDown": controls.direction.backward = false; break;
     }
+});
+
+// Dragonfly cursor target: raycast mouse onto horizontal plane at fly height
+const dragonflyRaycaster = new THREE.Raycaster();
+const dragonflyMouseNDC = new THREE.Vector2();
+const cursorWorldPos = new THREE.Vector3(0, 5, 0);
+const dragonflyPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+dragonflyPlane.setFromNormalAndCoplanarPoint(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 5, 0));
+window.addEventListener('mousemove', (e) => {
+    dragonflyMouseNDC.x = (e.clientX / window.innerWidth) * 2 - 1;
+    dragonflyMouseNDC.y = -(e.clientY / window.innerHeight) * 2 + 1;
 });
 
 window.addEventListener('resize', onWindowResize, false)
@@ -835,7 +855,7 @@ const WALKABLE_WORLD_BOUNDS = new THREE.Box3(
     new THREE.Vector3(90, 12, 15)
 );
 const octree = new Octree(WALKABLE_WORLD_BOUNDS, { maxDepth: 6, minSize: 2 });
-const MAX_PLACEMENT_RETRIES = 50;
+const MAX_PLACEMENT_RETRIES = 20;
 
 const walkableRegions = [
     createBezierSampler(farPavementControlPoints),
@@ -892,6 +912,18 @@ const _physicsAvoid = new THREE.Vector3();
 const _physicsClampResult = new THREE.Vector3();
 const _physicsWanderVec = new THREE.Vector3();
 
+// Dragonfly physics temporaries
+const _dfDesired = new THREE.Vector3();
+const _dfSteer = new THREE.Vector3();
+const _dfWanderCentre = new THREE.Vector3();
+const _dfWanderDisplacement = new THREE.Vector3();
+const _dfSep = new THREE.Vector3();
+const _dfAvoid = new THREE.Vector3();
+const WANDER_CIRCLE_RADIUS = 0.8;
+const WANDER_JITTER = 0.15;
+const WANDER_OFFSET_DIST = 1.2;
+const DRAGONFLY_SLOW_RADIUS = 3;
+
 // Hybrid crowd: InstancedMesh for medium (40-100m); characters beyond 100m are culled
 const INSTANCED_MAX = 1000;
 const instancedGeoMedium = Figure.getInstanceGeometryMedium();
@@ -901,6 +933,21 @@ instancedMeshMedium.count = 0;
 instancedMeshMedium.geometry.setAttribute('instanceColor', new THREE.InstancedBufferAttribute(new Float32Array(INSTANCED_MAX * 3), 3));
 instancedMeshMedium.castShadow = false;
 scene.add(instancedMeshMedium);
+
+// Dragonfly instanced meshes (close = body+wings, far = cube LOD)
+const DRAGONFLY_MAX = 500;
+const dfInstancedClose = new THREE.InstancedMesh(getDragonflyGeometry(), getDragonflyMaterial(), DRAGONFLY_MAX);
+dfInstancedClose.count = 0;
+dfInstancedClose.geometry.setAttribute('instanceColor', new THREE.InstancedBufferAttribute(new Float32Array(DRAGONFLY_MAX * 3), 3));
+dfInstancedClose.castShadow = false;
+dfInstancedClose.receiveShadow = false;
+scene.add(dfInstancedClose);
+const dfInstancedFar = new THREE.InstancedMesh(getDragonflyGeometryLOD(), getDragonflyMaterial(), DRAGONFLY_MAX);
+dfInstancedFar.count = 0;
+dfInstancedFar.geometry.setAttribute('instanceColor', new THREE.InstancedBufferAttribute(new Float32Array(DRAGONFLY_MAX * 3), 3));
+dfInstancedFar.castShadow = false;
+dfInstancedFar.receiveShadow = false;
+scene.add(dfInstancedFar);
 
 // Torso/legs and skin colour for instanced tier (blended via skinPart vertex attribute)
 const INSTANCE_TORSO_COLOR = new THREE.Color().setHex(0x4A7BA7);
@@ -942,6 +989,65 @@ const _listMid = [];
 
 let people = [];
 modifyCrowd(PARAMS.people.count);
+
+let dragonflies = [];
+const _listDfClose = [];
+const _listDfFar = [];
+const DRAGONFLY_LOD_CLOSE = 40;
+const DRAGONFLY_CULL_DISTANCE = 80;
+
+function updateDragonflies() {
+    const targetCount = Math.min(Math.max(0, Math.floor(PARAMS.dragonflies.count)), DRAGONFLY_MAX);
+    const delta = targetCount - dragonflies.length;
+    if (delta > 0) {
+        const bounds = WALKABLE_WORLD_BOUNDS;
+        for (let i = 0; i < delta; i++) {
+            const x = bounds.min.x + Math.random() * (bounds.max.x - bounds.min.x);
+            const z = bounds.min.z + Math.random() * (bounds.max.z - bounds.min.z);
+            const y = 2 + Math.random() * 8;
+            dragonflies.push(createDragonfly({ position: new THREE.Vector3(x, y, z) }));
+        }
+    } else if (delta < 0) {
+        dragonflies.length = targetCount;
+    }
+}
+
+updateDragonflies();
+
+// Dragonfly flight bounds (Y range for flying)
+const DRAGONFLY_MIN_Y = 0;
+const DRAGONFLY_MAX_Y = 15;
+
+function getDragonflyNavGrid() {
+    const bounds = {
+        minX: WALKABLE_WORLD_BOUNDS.min.x,
+        maxX: WALKABLE_WORLD_BOUNDS.max.x,
+        minY: DRAGONFLY_MIN_Y,
+        maxY: DRAGONFLY_MAX_Y,
+        minZ: WALKABLE_WORLD_BOUNDS.min.z,
+        maxZ: WALKABLE_WORLD_BOUNDS.max.z
+    };
+    // Block cells that sit below (or inside) ground/walkable surfaces
+    const isBlocked = (x, y, z) => {
+        const info = walkableSampler.getSurfaceInfo(x, z);
+        if (info.inside && info.y != null && y <= info.y + 0.5) return true;
+        return false;
+    };
+    // Spherical obstacles (buildings/lilies extruded into 3D)
+    const dunelmY = dunelm.position.y || 0;
+    const sphereObstacles = [
+        { x: dunelm.position.x, y: dunelmY, z: dunelm.position.z, radius: dunelm.userData.radius }
+    ];
+    for (let i = 0; i < lilies.length; i++) {
+        sphereObstacles.push({
+            x: lilies[i].x,
+            y: lilies[i].y,
+            z: lilies[i].z,
+            radius: LILY_AVOID_RADIUS
+        });
+    }
+    return createNavigationGrid(bounds, 2, isBlocked, sphereObstacles);
+}
 
 let cameraFrustum = new THREE.Frustum();
 let frustumMatrix = new THREE.Matrix4();
@@ -1174,7 +1280,7 @@ sepSlider.__li.style.opacity = PARAMS.flocking.sep.on ? 1 : 0.5;
 sepSlider.domElement.disabled = !PARAMS.flocking.sep.on;
 
 const aliCheckbox = flockingFolder.add(PARAMS.flocking.ali, "on").name("Alignment");
-const aliSlider = flockingFolder.add(PARAMS.flocking.ali, "val", 0, 3, 0.1).name("Alignment Weight");
+const aliSlider = flockingFolder.add(PARAMS.flocking.ali, "val", 0, 1, 0.05).name("Alignment Weight");
 aliCheckbox.onChange((v) => {
     PARAMS.flocking.ali.on = v;
     aliSlider.__li.style.opacity = v ? 1 : 0.5;
@@ -1202,6 +1308,21 @@ farHillFolder.open();
 const lilyFolder = gui.addFolder("Lilies");
 lilyFolder.add(PARAMS.lilies, "count", 0, 40).step(1).name("Count").onChange(updateLilies);
 lilyFolder.open();
+
+const dragonflyFolder = gui.addFolder("Dragonflies");
+dragonflyFolder.add(PARAMS.dragonflies, "count", 0, 500).step(1).name("Count").onChange((v) => {
+    const targetCount = Math.max(0, Math.min(500, Math.floor(Number(v))));
+    PARAMS.dragonflies.count = targetCount;
+    updateDragonflies();
+});
+dragonflyFolder.add(PARAMS.dragonflies, "followCursor").name("Follow cursor").onChange((v) => {
+    if (!v) {
+        for (let i = 0; i < dragonflies.length; i++) dragonflies[i].path = [];
+    }
+});
+dragonflyFolder.add(PARAMS.dragonflies, "maxSpeed", 0.1, 1, 0.05).name("Max speed");
+dragonflyFolder.add(PARAMS.dragonflies, "maxForce", 0.01, 0.1, 0.005).name("Max force");
+dragonflyFolder.open();
 
 const lightFestivalFolder = gui.addFolder("Light Festival");
 lightFestivalFolder.add(PARAMS.bloom, "strength", 0, 2).name("Bloom strength").onChange((v) => { bloomPass.strength = v; PARAMS.bloom.strength = v; });
@@ -1568,6 +1689,10 @@ function modifyCrowd(n) {
 // PARAMS moved to unified PARAMS object at top of GUI section
 const MAX_FORCE = 0.03;
 const MAX_SPEED = 0.25;
+const SURFACE_SAMPLE_EVERY = 2;        // call getSurfaceInfo at most every N frames per agent (close)
+const SURFACE_SAMPLE_EVERY_FAR = 10;    // distant agents: sample less often (LOD)
+const SURFACE_SAMPLE_DISTANCE = 0.5;   // or when moved this far in XZ from last sample
+const SURFACE_LOD_DISTANCE = 40;      // beyond this distance from camera, use SURFACE_SAMPLE_EVERY_FAR
 
 function applyPhysics(person) {
     if (!person || !person.pos) return person;
@@ -1668,7 +1793,22 @@ function applyPhysics(person) {
     person.vel.clampLength(0, person.maxSpeed);
 
     _physicsCandidatePos.copy(person.pos).add(person.vel);
-    const info = walkableSampler.getSurfaceInfo(_physicsCandidatePos.x, _physicsCandidatePos.z, person._surfaceCache);
+    const distToCam = person.pos.distanceTo(camera.position);
+    const surfaceSampleEvery = distToCam > SURFACE_LOD_DISTANCE ? SURFACE_SAMPLE_EVERY_FAR : SURFACE_SAMPLE_EVERY;
+    const shouldSample = person._surfaceSampleFrame === undefined ||
+        (frameCount - person._surfaceSampleFrame >= surfaceSampleEvery) ||
+        (person._lastSurfaceX !== undefined && Math.hypot(_physicsCandidatePos.x - person._lastSurfaceX, _physicsCandidatePos.z - person._lastSurfaceZ) > SURFACE_SAMPLE_DISTANCE);
+    let info;
+    if (shouldSample) {
+        info = walkableSampler.getSurfaceInfo(_physicsCandidatePos.x, _physicsCandidatePos.z, person._surfaceCache);
+        person._surfaceSampleFrame = frameCount;
+        person._lastSurfaceY = info.y;
+        person._lastSurfaceInside = info.inside;
+        person._lastSurfaceX = _physicsCandidatePos.x;
+        person._lastSurfaceZ = _physicsCandidatePos.z;
+    } else {
+        info = { inside: !!person._lastSurfaceInside, y: person._lastSurfaceY != null ? person._lastSurfaceY : null };
+    }
     if (info.inside && info.y !== null) {
         person.pos.set(_physicsCandidatePos.x, info.y + FEET_SURFACE_Y_OFFSET / 2, _physicsCandidatePos.z);
         if (person.prevPosition) person.prevPosition.copy(person.pos);
@@ -1682,6 +1822,117 @@ function applyPhysics(person) {
     }
 
     return person;
+}
+
+function applyDragonflyPhysics(dragonfly) {
+    if (!dragonfly || !dragonfly.pos) return dragonfly;
+    dragonfly.acc.set(0, 0, 0);
+
+    const maxSpeed = dragonfly.maxSpeed * (PARAMS.dragonflies.maxSpeed / 0.35);
+    const maxForce = dragonfly.maxForce * (PARAMS.dragonflies.maxForce / 0.04);
+
+    // Separation from other dragonflies (within forceRadius 0.5)
+    _dfSep.set(0, 0, 0);
+    let sepCount = 0;
+    for (let i = 0; i < dragonflies.length; i++) {
+        const other = dragonflies[i];
+        if (other === dragonfly) continue;
+        const dist = dragonfly.pos.distanceTo(other.pos);
+        if (dist > 0 && dist < dragonfly.forceRadius) {
+            _dfAvoid.subVectors(dragonfly.pos, other.pos).normalize().divideScalar(dist);
+            _dfSep.add(_dfAvoid);
+            sepCount++;
+        }
+    }
+    if (sepCount > 0) {
+        _dfSep.divideScalar(sepCount).normalize().multiplyScalar(maxSpeed).sub(dragonfly.vel);
+        dragonfly.acc.add(_dfSteer.copy(_dfSep).clampLength(0, maxForce).multiplyScalar(2));
+    }
+
+    // Avoid Dunelm
+    const dunelmPos = dunelm.position;
+    const distDunelm = dragonfly.pos.distanceTo(dunelmPos);
+    if (distDunelm < dunelm.userData.radius) {
+        _dfAvoid.subVectors(dragonfly.pos, dunelmPos).normalize().multiplyScalar((dunelm.userData.radius - distDunelm) * 0.5);
+        dragonfly.acc.add(_dfAvoid);
+    }
+
+    // Avoid lilies
+    for (let L = 0; L < lilies.length; L++) {
+        _dfAvoid.set(dragonfly.pos.x - lilies[L].x, dragonfly.pos.y - lilies[L].y, dragonfly.pos.z - lilies[L].z);
+        const distLily = _dfAvoid.length();
+        if (distLily < LILY_AVOID_RADIUS && distLily > 0) {
+            _dfAvoid.normalize().multiplyScalar((LILY_AVOID_RADIUS - distLily) * 0.5);
+            dragonfly.acc.add(_dfAvoid);
+        }
+    }
+
+    // Boundary containment (XZ from world bounds, Y from flight bounds)
+    const bounds = WALKABLE_WORLD_BOUNDS;
+    const margin = 5;
+    if (dragonfly.pos.x < bounds.min.x + margin) dragonfly.acc.x += 0.5;
+    if (dragonfly.pos.x > bounds.max.x - margin) dragonfly.acc.x -= 0.5;
+    if (dragonfly.pos.z < bounds.min.z + margin) dragonfly.acc.z += 0.5;
+    if (dragonfly.pos.z > bounds.max.z - margin) dragonfly.acc.z -= 0.5;
+    if (dragonfly.pos.y < DRAGONFLY_MIN_Y + 1) dragonfly.acc.y += 0.3;
+    if (dragonfly.pos.y > DRAGONFLY_MAX_Y - 1) dragonfly.acc.y -= 0.3;
+
+    // Seek/Arrive (A* waypoint or cursor target) vs Wander
+    const target = dragonfly.path && dragonfly.path.length > 0 && dragonfly.pathIndex < dragonfly.path.length
+        ? dragonfly.path[dragonfly.pathIndex]
+        : (PARAMS.dragonflies.followCursor ? cursorWorldPos : null);
+
+    if (target) {
+        _dfDesired.subVectors(target, dragonfly.pos);
+        const dist = _dfDesired.length();
+        if (dist < 0.5 && dragonfly.path && dragonfly.pathIndex < dragonfly.path.length) {
+            dragonfly.pathIndex++;
+        } else if (dist > 0.01) {
+            _dfDesired.normalize();
+            if (dist < DRAGONFLY_SLOW_RADIUS) {
+                _dfDesired.multiplyScalar(maxSpeed * (dist / DRAGONFLY_SLOW_RADIUS));
+            } else {
+                _dfDesired.multiplyScalar(maxSpeed);
+            }
+            _dfSteer.subVectors(_dfDesired, dragonfly.vel).clampLength(0, maxForce);
+            dragonfly.acc.add(_dfSteer);
+        }
+    } else {
+        // Wander: "carrot on a stick"
+        const velLen = dragonfly.vel.length();
+        if (velLen > 0.01) {
+            _dfWanderCentre.copy(dragonfly.vel).normalize().multiplyScalar(WANDER_OFFSET_DIST);
+        } else {
+            _dfWanderCentre.set(1, 0, 0);
+        }
+        dragonfly.wanderTheta += (Math.random() - 0.5) * WANDER_JITTER;
+        _dfWanderDisplacement.set(Math.cos(dragonfly.wanderTheta), (Math.random() - 0.5) * 0.3, Math.sin(dragonfly.wanderTheta)).multiplyScalar(WANDER_CIRCLE_RADIUS);
+        _dfWanderCentre.add(_dfWanderDisplacement);
+        _dfDesired.copy(dragonfly.pos).add(_dfWanderCentre);
+        _dfSteer.subVectors(_dfDesired, dragonfly.pos).normalize().multiplyScalar(maxSpeed).sub(dragonfly.vel).clampLength(0, maxForce);
+        dragonfly.acc.add(_dfSteer);
+    }
+
+    // Gentle vertical bobbing (wander in Y)
+    dragonfly.acc.y += (Math.random() - 0.5) * 0.02;
+
+    dragonfly.vel.add(dragonfly.acc);
+    dragonfly.vel.clampLength(0, maxSpeed);
+    dragonfly.pos.add(dragonfly.vel);
+
+    if (dragonfly.vel.length() > 0.02) {
+        const newFacing = Math.atan2(dragonfly.vel.x, dragonfly.vel.z);
+        let turnRate = newFacing - dragonfly.facingAngle;
+        while (turnRate > Math.PI) turnRate -= 2 * Math.PI;
+        while (turnRate < -Math.PI) turnRate += 2 * Math.PI;
+        dragonfly.bankAngle = dragonfly.bankAngle * 0.9 + (-turnRate * 0.15) * 0.1;
+        dragonfly.facingAngle = newFacing;
+    } else {
+        dragonfly.bankAngle *= 0.95;
+    }
+
+    dragonfly.acc.set(0, 0, 0);
+    return dragonfly;
 }
 
 // SNAPPING phase lengths (frames); total ~0.7 s at 60fps
@@ -1803,7 +2054,16 @@ function animate() {
     frustumMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     cameraFrustum.setFromProjectionMatrix(frustumMatrix);
 
-    treeElement.update(camera);
+    if (frameCount % 10 === 0) {
+        treeElement.update(camera);
+    }
+
+    // Update cursor world position for dragonfly follow mode (raycast onto y=5 plane)
+    if (PARAMS.dragonflies.followCursor && frameCount % 10 === 0) {
+        dragonflyRaycaster.setFromCamera(dragonflyMouseNDC, camera);
+        const cursorIntersect = dragonflyRaycaster.ray.intersectPlane(dragonflyPlane, cursorWorldPos);
+        if (cursorIntersect) cursorWorldPos.copy(cursorIntersect);
+    }
 
     let _t0;
     if (ENABLE_PROFILING) _t0 = performance.now();
@@ -1811,14 +2071,14 @@ function animate() {
     // Update person bounds; incremental octree update (only re-insert movers); skip INSIDE
     const OCTREE_MOVE_EPS_SQ = 1e-6;
     for (let i = 0; i < people.length; i++) {
-        const p = people[i];
-        if (p.state === "INSIDE") continue;
-        p.bounds.min.set(p.pos.x - PERSON_RADIUS, p.pos.y, p.pos.z - PERSON_RADIUS);
-        p.bounds.max.set(p.pos.x + PERSON_RADIUS, p.pos.y + CHARACTER_HEIGHT, p.pos.z + PERSON_RADIUS);
-        if (p.pos.distanceToSquared(p._lastOctreePos) > OCTREE_MOVE_EPS_SQ) {
-            octree.remove(p);
-            octree.insert(p);
-            p._lastOctreePos.copy(p.pos);
+        const person = people[i];
+        if (person.state === "INSIDE") continue;
+        person.bounds.min.set(person.pos.x - PERSON_RADIUS, person.pos.y, person.pos.z - PERSON_RADIUS);
+        person.bounds.max.set(person.pos.x + PERSON_RADIUS, person.pos.y + CHARACTER_HEIGHT, person.pos.z + PERSON_RADIUS);
+        if (person.pos.distanceToSquared(person._lastOctreePos) > OCTREE_MOVE_EPS_SQ) {
+            octree.remove(person);
+            octree.insert(person);
+            person._lastOctreePos.copy(person.pos);
         }
     }
 
@@ -1833,14 +2093,14 @@ function animate() {
         let someoneNearDoor = false;
         let someoneInside = false;
         for (let i = 0; i < people.length; i++) {
-            const p = people[i];
-            if (p.state === "INSIDE") {
+            const person = people[i];
+            if (person.state === "INSIDE") {
                 someoneInside = true;
-            } else if (p.state === "QUEUING" && p.target != null && p.target.distanceToSquared(DUNELM_QUEUE_TARGET) < 0.25 && p.pos.distanceTo(DUNELM_QUEUE_TARGET) < DUNELM_DOOR_OPEN_RADIUS) {
+            } else if (person.state === "QUEUING" && person.target != null && person.target.distanceToSquared(DUNELM_QUEUE_TARGET) < 0.25 && person.pos.distanceTo(DUNELM_QUEUE_TARGET) < DUNELM_DOOR_OPEN_RADIUS) {
                 someoneNearDoor = true;
-                octree.remove(p);
-                p.state = "INSIDE";
-                p.respawnAt = frameCount + DUNELM_INSIDE_MIN_FRAMES + Math.floor(Math.random() * (DUNELM_INSIDE_MAX_FRAMES - DUNELM_INSIDE_MIN_FRAMES));
+                octree.remove(person);
+                person.state = "INSIDE";
+                person.respawnAt = frameCount + DUNELM_INSIDE_MIN_FRAMES + Math.floor(Math.random() * (DUNELM_INSIDE_MAX_FRAMES - DUNELM_INSIDE_MIN_FRAMES));
             }
         }
         const doorShouldStayOpen = someoneNearDoor || someoneInside;
@@ -1856,35 +2116,53 @@ function animate() {
     const doorWorldPos = dunelm.userData.doorWorldPosition;
     const doorExitDir = dunelm.userData.doorExitDirection;
     for (let i = 0; i < people.length; i++) {
-        const p = people[i];
-        if (p.state === "INSIDE" && frameCount >= p.respawnAt) {
-            p.pos.copy(doorWorldPos).addScaledVector(doorExitDir, 1.0);
-            p.vel.copy(doorExitDir).multiplyScalar(p.maxSpeed * 0.5);
-            p.facingAngle = Math.atan2(doorExitDir.x, doorExitDir.z);
-            p._lastOctreePos.copy(p.pos);
-            octree.insert(p);
-            p.state = "WANDER";
-            p.target = null;
-            delete p.respawnAt;
+        const person = people[i];
+        if (person.state === "INSIDE" && frameCount >= person.respawnAt) {
+            person.pos.copy(doorWorldPos).addScaledVector(doorExitDir, 1.0);
+            person.vel.copy(doorExitDir).multiplyScalar(person.maxSpeed * 0.5);
+            person.facingAngle = Math.atan2(doorExitDir.x, doorExitDir.z);
+            person._lastOctreePos.copy(person.pos);
+            octree.insert(person);
+            person.state = "WANDER";
+            person.target = null;
+            delete person.respawnAt;
         }
     }
 
     // Apply physics and decision to all people (every 2 frames to save CPU); skip INSIDE
     if (frameCount % 2 === 0) {
         for (let i = 0; i < people.length; i++) {
-            if (!people[i] || !people[i].pos || people[i].state === "INSIDE") continue;
+            const person = people[i];
+            if (!person || !person.pos || person.state === "INSIDE") continue;
             if (frameCount % SNAP_END_FRAME === 0) {
-                if ((people[i].getPhone() != null) && (people[i].state !== "SNAPPING") && (Math.random() < 0.05)) {
-                    people[i].state = "SNAPPING";
-                    people[i].snapTimer = 0;
-                    people[i].snapFlashDone = false;
+                if ((person.getPhone() != null) && (person.state !== "SNAPPING") && (Math.random() < 0.05)) {
+                    person.state = "SNAPPING";
+                    person.snapTimer = 0;
+                    person.snapFlashDone = false;
                 }
             }
-            people[i] = updateDecision(people[i]);
-            people[i] = applyPhysics(people[i]);
-            animatePerson(people[i]);
+            person = updateDecision(person);
+            person = applyPhysics(person);
+            animatePerson(person);
         }
     }
+
+    // Dragonfly A* path recomputation (every 60 frames when follow cursor enabled)
+    if (PARAMS.dragonflies.followCursor && dragonflies.length > 0 && frameCount % 60 === 0) {
+        const navGrid = getDragonflyNavGrid();
+        for (let i = 0; i < dragonflies.length; i++) {
+            const dragonfly = dragonflies[i];
+            dragonfly.path = findPath(navGrid, dragonfly.pos, cursorWorldPos);
+            dragonfly.pathIndex = 0;
+        }
+    }
+
+    // Dragonfly physics (every frame)
+    for (let i = 0; i < dragonflies.length; i++) {
+        const dragonfly = dragonflies[i];
+        applyDragonflyPhysics(dragonfly);
+    }
+
     if (ENABLE_PROFILING) {
         _profileCrowdMs = performance.now() - _t0;
         _t0 = performance.now();
@@ -1987,11 +2265,51 @@ function animate() {
         if (colorAttr) colorAttr.needsUpdate = true;
     }
     fillInstancedMesh(instancedMeshMedium, _listMid);
+
+    // Dragonfly LOD: bucket by distance, fill instanced meshes
+    _listDfClose.length = 0;
+    _listDfFar.length = 0;
+    for (let i = 0; i < dragonflies.length; i++) {
+        const df = dragonflies[i];
+        const dist = df.pos.distanceTo(camPos);
+        if (dist > DRAGONFLY_CULL_DISTANCE) continue;
+        if (dist < DRAGONFLY_LOD_CLOSE) _listDfClose.push(df);
+        else _listDfFar.push(df);
+    }
+
+    for (let i = 0; i < _listDfClose.length; i++) {
+        const df = _listDfClose[i];
+        _dummyPosition.copy(df.pos);
+        _dummyQuaternion.setFromAxisAngle(_dummyAxisY, df.facingAngle);
+        _dummyQuatBank.setFromAxisAngle(_dummyAxisX, df.bankAngle ?? 0);
+        _dummyQuaternion.multiply(_dummyQuatBank);
+        _dummyMatrix.compose(_dummyPosition, _dummyQuaternion, _dummyScale);
+        dfInstancedClose.setMatrixAt(i, _dummyMatrix);
+        dfInstancedClose.setColorAt(i, df.color);
+    }
+    dfInstancedClose.count = _listDfClose.length;
+    dfInstancedClose.instanceMatrix.needsUpdate = true;
+    if (dfInstancedClose.geometry.attributes.instanceColor) dfInstancedClose.geometry.attributes.instanceColor.needsUpdate = true;
+    for (let i = 0; i < _listDfFar.length; i++) {
+        const df = _listDfFar[i];
+        _dummyPosition.copy(df.pos);
+        _dummyQuaternion.setFromAxisAngle(_dummyAxisY, df.facingAngle);
+        _dummyQuatBank.setFromAxisAngle(_dummyAxisX, df.bankAngle ?? 0);
+        _dummyQuaternion.multiply(_dummyQuatBank);
+        _dummyMatrix.compose(_dummyPosition, _dummyQuaternion, _dummyScale);
+        dfInstancedFar.setMatrixAt(i, _dummyMatrix);
+        dfInstancedFar.setColorAt(i, df.color);
+    }
+    dfInstancedFar.count = _listDfFar.length;
+    dfInstancedFar.instanceMatrix.needsUpdate = true;
+    if (dfInstancedFar.geometry.attributes.instanceColor) dfInstancedFar.geometry.attributes.instanceColor.needsUpdate = true;
+
     if (ENABLE_PROFILING) {
         _profileBucketMs = performance.now() - _t0;
         _t0 = performance.now();
     }
 
+    /*
     // Update all draggable Bezier surfaces
     for (let i = 0; i < draggableBezierSurfaces.length; i++) {
         const group = draggableBezierSurfaces[i];
@@ -2012,6 +2330,7 @@ function animate() {
     if (selectedBSplineIndex >= 0 && selectedBSplineIndex < draggableBSplineSurfaces.length) {
         updateCoordsDisplay();
     }
+    */
 
     // Wave plane: animate control points y = 20 + 8*sin(t + phase) then update surface
     const waveT = performance.now() * 0.001;
