@@ -7,6 +7,8 @@ import { Figure, createCrowdPerson, createPersonMeshOnly, getCrowdMaterials } fr
 import { GUI } from 'dat.gui';
 import { createDunelmHouse, createDefaultEnvMap } from './objects/su.js';
 import { createKingsgateBridge } from './objects/bridge.js';
+import { createFence } from './objects/fence.js';
+import { createHouse } from './objects/house.js';
 import { createStaircase } from './objects/staircase.js';
 import { getSharedPetalGeometry, getSharedStemGeometry, PETAL_LAYOUT } from './objects/lilyStructure.js';
 import { createConnectionSurface, createQuadSurface } from './objects/connectionSurface.js';
@@ -34,13 +36,12 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { SSAOPass } from 'three/examples/jsm/postprocessing/SSAOPass.js';
 import { FXAAShader } from 'three/examples/jsm/shaders/FXAAShader.js';
-import { WebGPURenderer } from 'three/webgpu';
 
 // Scene setup
 const scene = new THREE.Scene();
 
 // Slight fog (matches night gradient horizon)
-scene.background = new THREE.Color(0x601da3); // scene background for bloom contrast
+scene.background = new THREE.Color(0x7f3cc2); // scene background for bloom contrast
 scene.fog = new THREE.FogExp2(0x601da3, 0.003);
 // Near plane 0.5 improves depth precision so SSAO correctly occludes (objects behind planes don't show through)
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.5, 1000);
@@ -211,10 +212,8 @@ const bloomPass = new UnrealBloomPass(
     PARAMS.bloom.threshold
 );
 composer.addPass(bloomPass);
-
 // FXAA works best when it's final or penultimate pass
 composer.addPass(fxaaPass);
-
 // Output Pass (final pass, no blending)
 composer.addPass(new OutputPass());
 composer.setSize(window.innerWidth, window.innerHeight);
@@ -254,15 +253,27 @@ window.addEventListener('keyup', (e) => {
     }
 });
 
-// Dragonfly cursor target: raycast mouse onto horizontal plane at fly height
-const dragonflyRaycaster = new THREE.Raycaster();
-const dragonflyMouseNDC = new THREE.Vector2();
+// Dragonfly target: set on click (unproject onto y=5 plane)
 const cursorWorldPos = new THREE.Vector3(0, 5, 0);
-const dragonflyPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-dragonflyPlane.setFromNormalAndCoplanarPoint(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 5, 0));
-window.addEventListener('mousemove', (e) => {
-    dragonflyMouseNDC.x = (e.clientX / window.innerWidth) * 2 - 1;
-    dragonflyMouseNDC.y = -(e.clientY / window.innerHeight) * 2 + 1;
+const _dragonflyUnprojA = new THREE.Vector3();
+const _dragonflyUnprojB = new THREE.Vector3();
+window.addEventListener('click', (e) => {
+    const ndcX = (e.clientX / window.innerWidth) * 2 - 1;
+    const ndcY = -(e.clientY / window.innerHeight) * 2 + 1;
+    _dragonflyUnprojA.set(ndcX, ndcY, 0).unproject(camera);
+    _dragonflyUnprojB.set(ndcX, ndcY, 1).unproject(camera);
+    const dy = _dragonflyUnprojB.y - _dragonflyUnprojA.y;
+    if (Math.abs(dy) > 1e-9) {
+        const t = (5 - _dragonflyUnprojA.y) / dy;
+        cursorWorldPos.lerpVectors(_dragonflyUnprojA, _dragonflyUnprojB, t);
+        // Invalidate A* paths so dragonflies recompute toward the new click target
+        if (PARAMS.dragonflies.followCursor) {
+            for (let i = 0; i < dragonflies.length; i++) {
+                dragonflies[i].path = [];
+                dragonflies[i].pathIndex = 0;
+            }
+        }
+    }
 });
 
 window.addEventListener('resize', onWindowResize, false)
@@ -325,6 +336,11 @@ const farHill = generateTerrain(300, 50, 32, { endHeight: 55 }); // 32 segments 
 farHill.position.set(0, -55, -135);
 farHill.rotateZ(Math.PI);
 scene.add(farHill);
+
+const nearHill = generateTerrain(300, 50, 32, { endHeight: 55 }); // 32 segments for FPS (was 64)
+nearHill.position.set(0, -55, -65, { endHeight: 55 })
+scene.add(nearHill);
+
 
 // Far-hill billboard trees (instanced planes that face the camera; frustum-culled)
 const FAR_HILL_TREE_BOUNDS = { xMin: -95, xMax: 95, zMin: -155, zMax: -115, yFallback: -55 };
@@ -514,7 +530,7 @@ const grassMaterial = new THREE.MeshPhongMaterial({
     side: THREE.DoubleSide,
     shininess: 80
 });
-const bsplineSurface = createBSplineSurface(bsplineControlPointsGrass1, {
+const bsplineSurfaceGrass1 = createBSplineSurface(bsplineControlPointsGrass1, {
     dimU: 4,
     dimV: 4,
     segments: 10,
@@ -524,8 +540,8 @@ const bsplineSurface = createBSplineSurface(bsplineControlPointsGrass1, {
     color: 0x00aaff,
     material: grassMaterial
 });
-bsplineSurface.position.set(0, 0, -20);
-scene.add(bsplineSurface);
+bsplineSurfaceGrass1.position.set(0, 0, -20);
+scene.add(bsplineSurfaceGrass1);
 
 const bsplineControlPointsGrass2 = [
     // Row 0 (i=0)
@@ -594,9 +610,8 @@ wavePlaneGroup.position.set(-75, 0, -150);
 scene.add(wavePlaneGroup);
 
 // Grid of point lights on the wave plane (raycasting each frame to follow surface y).
-// Keep grid small to stay under WebGL MAX_FRAGMENT_UNIFORM_VECTORS and for FPS.
 // Sphere materials use emissive so they appear to emit light and pass the bloom threshold (see bloomParams.threshold).
-const WAVE_PLANE_LIGHTS_GRID = 4; // 2x2 grid of emissive spheres (no PointLights; spheres provide colour + bloom)
+const WAVE_PLANE_LIGHTS_GRID = 8; // 2x2 grid of emissive spheres (no PointLights; spheres provide colour + bloom)
 // Reusable vector for B-spline eval (avoids allocation in animate loop)
 const _wavePlaneEvalWorldPos = new THREE.Vector3();
 const wavePlaneLightSphereGeo = new THREE.IcosahedronGeometry(1, 1);
@@ -646,7 +661,7 @@ let dragControlsBSpline = null;
 const dunelmEnvMap = createDefaultEnvMap();
 plane.material.envMap = dunelmEnvMap;
 const dunelm = createDunelmHouse(10, -40, 3, { envMap: dunelmEnvMap });
-dunelm.traverse((o) => { if (o.isMesh) { o.receiveShadow = true; o.castShadow = true; } });
+dunelm.traverse((o) => { if (o.isMesh) { o.receiveShadow = false; o.castShadow = true; } });
 scene.add(dunelm);
 scene.updateMatrixWorld(true);
 const _doorWorldPos = new THREE.Vector3();
@@ -659,6 +674,25 @@ const bridgeScale = 4;
 const bridge = createKingsgateBridge(-20, -0.4, -100, bridgeScale, { deckLength: bridgeDeckLength });
 bridge.traverse((o) => { if (o.isMesh) { o.receiveShadow = true; o.castShadow = true; } });
 scene.add(bridge);
+
+// House (Bradley Hall style: two storeys, gable roof, chimney, door, windows)
+const house = createHouse(40, -5.3, -45, 2.2);
+house.rotateY(Math.PI);
+house.rotateZ(Math.PI/32);
+house.traverse((o) => { if (o.isMesh) { o.receiveShadow = false; o.castShadow = true; } });
+scene.add(house);
+const house2 = createHouse(57.6, -9.6, -40, 2.2);
+house2.rotateY(Math.PI / 1.2);
+house2.rotateZ(Math.PI/32);
+house2.traverse((o) => { if (o.isMesh) { o.receiveShadow = false; o.castShadow = true; } });
+scene.add(house2);
+const house3 = createHouse(75.2, -14.4, -33, 2.2);
+house3.rotateY(Math.PI / 1.4);
+house3.rotateZ(Math.PI/32);
+house3.traverse((o) => { if (o.isMesh) { o.receiveShadow = false; o.castShadow = true; } });
+scene.add(house3);
+
+// Houses along back road
 
 // Staircase from pavement to bridge
 const staircaseStart = new THREE.Vector3(-10, -3.7, -6.8);   // pavement edge center
@@ -682,6 +716,17 @@ const connectionSurfacePoints = [
 ];
 const connectionSurface = createConnectionSurface(connectionSurfacePoints, { color: 0x666666 });
 scene.add(connectionSurface);
+
+// Fence from bridge right railing to SU left (curved)
+const fenceControlPoints = [
+    connectionSurfacePoints[5].clone(),   // bridge right (-16, 0.8, -40)
+    connectionSurfacePoints[0].clone()   // SU left (-4.25, 0, -37.75)
+];
+const fence = createFence(fenceControlPoints, { railingHeight: 2 });
+fence.traverse((o) => { if (o.isMesh) { o.receiveShadow = true; o.castShadow = true; } });
+scene.add(fence);
+fence.updateMatrixWorld(true);
+fence.userData.boundingBox = new THREE.Box3().setFromObject(fence).expandByScalar(0.7);
 
 // Path from connection surface (edge 3-4: staircase left to bridge left) to road at y>7 (so path does not cross staircase)
 const PATH_WIDTH = 10;
@@ -736,11 +781,45 @@ const pathSurface = createQuadSurface(pathQuadPoints, { color: 0x666666 });
 pathSurface.traverse((o) => { if (o.isMesh) { o.receiveShadow = true; o.castShadow = true; } });
 scene.add(pathSurface);
 
+// Fence along pathSurface edge: bridge left to pavement (staircase left)
+const fenceEnd = pathRoadP0.clone().add(new THREE.Vector3(3.5, -0.7, -2.6));
+const pathFenceControlPoints = [
+    pathConnectionA.clone(),
+    fenceEnd
+];
+const pathFence = createFence(pathFenceControlPoints, { railingHeight: 2 });
+pathFence.traverse((o) => { if (o.isMesh) { o.receiveShadow = false; o.castShadow = true; } });
+scene.add(pathFence);
+pathFence.updateMatrixWorld(true);
+pathFence.userData.boundingBox = new THREE.Box3().setFromObject(pathFence).expandByScalar(0.7);
+
 // Oak tree in front of SU entrance
 const treeElement = createOakTree(0, 0);
 treeElement.traverse((o) => { if (o.isMesh) o.castShadow = true; });
 treeElement.position.set(-28, 1, -12);
 scene.add(treeElement);
+
+// Two more oak trees randomly on bsplineSurfaceGrass1
+bsplineSurfaceGrass1.updateMatrixWorld(true);
+const treePlacePos = new THREE.Vector3();
+const tree2 = createOakTree(0, 0);
+tree2.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+let u = 0.15 + Math.random() * 0.7, v = 0.15 + Math.random() * 0.7;
+getBSplineSurfaceWorldPointAtNormalized(bsplineSurfaceGrass1, bsplineControlPointsGrass1, u, v, treePlacePos);
+tree2.position.set(treePlacePos.x, treePlacePos.y, treePlacePos.z);
+scene.add(tree2);
+const tree3 = createOakTree(0, 0);
+tree3.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+u = 0.15 + Math.random() * 0.7;
+v = 0.15 + Math.random() * 0.7;
+getBSplineSurfaceWorldPointAtNormalized(bsplineSurfaceGrass1, bsplineControlPointsGrass1, u, v, treePlacePos);
+tree3.position.set(treePlacePos.x, treePlacePos.y, treePlacePos.z);
+scene.add(tree3);
+
+const environmentObjects = [
+    treeElement, tree2, tree3, staircase, dunelm,
+    house, house2, house3, fence, pathFence
+];
 
 // Lily structures (Elysium Garden style) — instanced stems + petals (2 draw calls instead of 80)
 const LUMINOUS_PETAL_COLORS = [
@@ -782,6 +861,7 @@ lilyPetalInstancedMesh.receiveShadow = true;
 lilyContainer.add(lilyPetalInstancedMesh);
 
 let lilies = [];
+let lilyAvoidBounds = null;
 const _lilyEvalPos = new THREE.Vector3();
 const _lilyDummy = new THREE.Object3D();
 const _lilyPetalDummy = new THREE.Object3D();
@@ -794,11 +874,11 @@ function updateLilies() {
     lilyStemInstancedMesh.count = n;
     lilyPetalInstancedMesh.count = n * PETALS_PER_LILY;
     if (n <= 0) return;
-    bsplineSurface.updateMatrixWorld(true);
+    bsplineSurfaceGrass1.updateMatrixWorld(true);
     for (let i = 0; i < n; i++) {
         const u = 0.12 + Math.random() * 0.76;
         const v = 0.12 + Math.random() * 0.76;
-        getBSplineSurfaceWorldPointAtNormalized(bsplineSurface, bsplineControlPointsGrass1, u, v, _lilyEvalPos);
+        getBSplineSurfaceWorldPointAtNormalized(bsplineSurfaceGrass1, bsplineControlPointsGrass1, u, v, _lilyEvalPos);
         const x = _lilyEvalPos.x, y = _lilyEvalPos.y, z = _lilyEvalPos.z;
         const stemHeight = 4 + Math.random() * 1.5;
         const petalColor = randomLuminousPetalColor();
@@ -828,6 +908,23 @@ function updateLilies() {
         }
         lilies.push({ x, y, z, stemHeight, petalColor });
     }
+    // Precompute lily avoidance bounds (XZ extent + LILY_AVOID_RADIUS) for fast "person near lilies" check
+    if (lilies.length > 0) {
+        let lxMin = Infinity, lxMax = -Infinity, lzMin = Infinity, lzMax = -Infinity;
+        for (let i = 0; i < lilies.length; i++) {
+            const l = lilies[i];
+            if (l.x < lxMin) lxMin = l.x;
+            if (l.x > lxMax) lxMax = l.x;
+            if (l.z < lzMin) lzMin = l.z;
+            if (l.z > lzMax) lzMax = l.z;
+        }
+        lilyAvoidBounds = new THREE.Box3(
+            new THREE.Vector3(lxMin - 1, -1e6, lzMin - 1),
+            new THREE.Vector3(lxMax + 1, 1e6, lzMax + 1)
+        );
+    } else {
+        lilyAvoidBounds = null;
+    }
     lilyStemInstancedMesh.instanceMatrix.needsUpdate = true;
     if (lilyPetalInstancedMesh.instanceColor) lilyPetalInstancedMesh.instanceColor.needsUpdate = true;
     lilyPetalInstancedMesh.instanceMatrix.needsUpdate = true;
@@ -836,6 +933,17 @@ updateLilies();
 
 // Disable matrix auto-update on static objects so Three.js skips recursive updateMatrixWorld (Lecture 1: dirty flags).
 scene.updateMatrixWorld(true);
+
+// Precompute bounding boxes for dragonfly environment obstacle avoidance (Box3 + clampPoint at runtime)
+const _envBoxTemp = new THREE.Box3();
+const ENV_BOX_MARGIN = 0.7;
+for (let i = 0; i < environmentObjects.length; i++) {
+    const obj = environmentObjects[i];
+    obj.updateMatrixWorld(true);
+    _envBoxTemp.setFromObject(obj);
+    _envBoxTemp.expandByScalar(ENV_BOX_MARGIN);
+    obj.userData.boundingBox = _envBoxTemp.clone();
+}
 function disableMatrixAutoUpdateForStatic(...objects) {
     for (const obj of objects) {
         if (!obj) continue;
@@ -845,8 +953,8 @@ function disableMatrixAutoUpdateForStatic(...objects) {
 }
 disableMatrixAutoUpdateForStatic(
     plane, farHill, roadSurface, farPavementSurface, nearPavementSurface,
-    bsplineSurface, bsplineSurfaceGrass2, wavePlaneGroup, dunelm, bridge, staircase,
-    connectionSurface, pathSurface, treeElement, lilyContainer, farHillBillboardInstancedMesh
+    bsplineSurfaceGrass1, bsplineSurfaceGrass2, wavePlaneGroup, dunelm, bridge, staircase,
+    connectionSurface, pathSurface, house, house2, house3, fence, pathFence, treeElement, lilyContainer, farHillBillboardInstancedMesh
 );
 
 // --- Instanced characters with octree, frustum culling, walkable placement ---
@@ -854,18 +962,34 @@ const WALKABLE_WORLD_BOUNDS = new THREE.Box3(
     new THREE.Vector3(-75, -25, -165),
     new THREE.Vector3(90, 12, 15)
 );
-const octree = new Octree(WALKABLE_WORLD_BOUNDS, { maxDepth: 6, minSize: 2 });
+const octree = new Octree(WALKABLE_WORLD_BOUNDS, { maxDepth: 5, minSize: 2 });
 const MAX_PLACEMENT_RETRIES = 20;
+const PERSON_BOUNDARY_MARGIN = 2; // steer/placement: keep people this far from world bounds (avoids stuck outside collision avoidance)
 
 const walkableRegions = [
     createBezierSampler(farPavementControlPoints),
     createBezierSampler(nearPavementControlPoints),
-    createBSplineSampler(bsplineSurface, bsplineControlPointsGrass1),
+    createBezierSampler(roadControlPoints),
+    createBSplineSampler(bsplineSurfaceGrass1, bsplineControlPointsGrass1),
+    createBSplineSampler(bsplineSurfaceGrass2, bsplineControlPointsGrass2),
     createBridgeDeckSampler(-20, 0.8, -100, bridgeScale, bridgeDeckLength),
     createConnectionSampler(connectionSurfacePoints),
     createQuadSampler(pathQuadPoints),
     createStaircaseSampler(staircaseStart, staircaseEnd, 6, 1.0)
 ];
+const walkableMeshes = [
+    connectionSurface,
+    pathSurface,
+    roadSurface,
+    farPavementSurface,
+    nearPavementSurface,
+    bridge,
+    staircase,
+    bsplineSurfaceGrass1,
+    bsplineSurfaceGrass2
+];
+bsplineSurfaceGrass1.updateMatrixWorld(true);
+bsplineSurfaceGrass2.updateMatrixWorld(true);
 const walkableSampler = createCombinedSampler(walkableRegions, {
     bounds: {
         minX: WALKABLE_WORLD_BOUNDS.min.x,
@@ -873,13 +997,15 @@ const walkableSampler = createCombinedSampler(walkableRegions, {
         minZ: WALKABLE_WORLD_BOUNDS.min.z,
         maxZ: WALKABLE_WORLD_BOUNDS.max.z
     },
-    cellSize: 1
+    cellSize: 1,
+    walkableMeshes,
+    yCeiling: 50
 });
 
 // Sampled pos is the surface (plane) where feet should stand. We add getFeetSurfaceYOffset() so the
 // mesh origin (which sits above the feet in bind pose) is placed above the surface and feet touch the plane.
 const CHARACTER_HEIGHT = 3.65; // feet to top of head for bounds
-const PERSON_RADIUS = 0.8; // for bounds and placement
+const PERSON_RADIUS = 0.5; // for bounds and placement
 const LILY_AVOID_RADIUS = 1; // avoid placing and walking through lilies (same manner as Dunelm)
 const FEET_SURFACE_Y_OFFSET = Figure.getFeetSurfaceYOffset();
 const FLOCK_RADIUS = 10; // max distance for separation/alignment/cohesion (tighter for visible group behaviour)
@@ -899,6 +1025,7 @@ const _dummyPosition = new THREE.Vector3();
 const _dummyQuaternion = new THREE.Quaternion();
 const _dummyScale = new THREE.Vector3(1, 1, 1);
 const _lilyWorldPos = new THREE.Vector3();
+
 // Reusable temporaries for applyPhysics (avoid per-frame allocations)
 const _physicsForce = new THREE.Vector3();
 const _physicsSep = new THREE.Vector3();
@@ -906,26 +1033,27 @@ const _physicsAli = new THREE.Vector3();
 const _physicsCoh = new THREE.Vector3();
 const _physicsPush = new THREE.Vector3();
 const _physicsDestination = new THREE.Vector3();
-const _physicsAwayFromLily = new THREE.Vector3();
 const _physicsCandidatePos = new THREE.Vector3();
 const _physicsAvoid = new THREE.Vector3();
 const _physicsClampResult = new THREE.Vector3();
 const _physicsWanderVec = new THREE.Vector3();
+const _physicsBoundarySteer = new THREE.Vector3();
+const _physicsClampedPoint = new THREE.Vector3();
+const _animatePersonQuat = new THREE.Quaternion();
+const _animatePersonAxisY = new THREE.Vector3(0, 1, 0);
 
 // Dragonfly physics temporaries
 const _dfDesired = new THREE.Vector3();
 const _dfSteer = new THREE.Vector3();
-const _dfWanderCentre = new THREE.Vector3();
-const _dfWanderDisplacement = new THREE.Vector3();
 const _dfSep = new THREE.Vector3();
 const _dfAvoid = new THREE.Vector3();
+const _dfClampedPoint = new THREE.Vector3();
+const _dfRandomDir = new THREE.Vector3();
+const _dfPhysicsForce = new THREE.Vector3();
 const _dfFlockBox = new THREE.Box3();
-const _dfFlockBoxSize = new THREE.Vector3(1, 1, 1); // forceRadius 0.5 => query box 2*radius per axis
+const _dfFlockBoxSize = new THREE.Vector3(0.5, 0.5, 0.5); // forceRadius 0.5 => query box 2*radius per axis
 const _dfFlockNeighbors = [];
 const _dfSeenIds = new Set(); // dedupe octree results (entity can be in multiple cells)
-const WANDER_CIRCLE_RADIUS = 0.8;
-const WANDER_JITTER = 0.15;
-const WANDER_OFFSET_DIST = 1.2;
 const DRAGONFLY_SLOW_RADIUS = 3;
 
 // Hybrid crowd: InstancedMesh for medium (40-100m); characters beyond 100m are culled
@@ -1046,29 +1174,6 @@ let octreeDebugLine = null;
 let dragonflyOctreeDebugLine = null;
 const animationClock = new THREE.Clock();
 
-function applyWalkCycle(skinnedMesh, entity, time) {
-    const bi = skinnedMesh.userData.boneIndices;
-    if (!bi || !skinnedMesh.skeleton) return;
-
-    const bones = skinnedMesh.skeleton.bones;
-    const phase = (entity.id * 0.1 + time) % (2 * Math.PI);
-    const legSwing = 0.4;
-    const armSwing = 0.3;
-    if (bones[bi.legL]) bones[bi.legL].rotation.x = phase < Math.PI ? -legSwing : legSwing;
-    if (bones[bi.legR]) bones[bi.legR].rotation.x = phase < Math.PI ? legSwing : -legSwing;
-    if (bones[bi.armL]) bones[bi.armL].rotation.x = phase < Math.PI ? armSwing : -armSwing;
-    if (bones[bi.armR]) bones[bi.armR].rotation.x = phase < Math.PI ? -armSwing : armSwing;
-}
-
-function applyIdle(skinnedMesh) {
-    const bi = skinnedMesh.userData.boneIndices;
-    if (!bi || !skinnedMesh.skeleton) return;
-    const bones = skinnedMesh.skeleton.bones;
-    if (bones[bi.legL]) bones[bi.legL].rotation.x = 0;
-    if (bones[bi.legR]) bones[bi.legR].rotation.x = 0;
-    if (bones[bi.armL]) bones[bi.armL].rotation.x = 0;
-    if (bones[bi.armR]) bones[bi.armR].rotation.x = 0;
-}
 
 function updateOctreeDebugLine() {
     if (octreeDebugLine) {
@@ -1397,7 +1502,7 @@ perfFolder.add(PARAMS.performance, 'shadowsEnabled').name('Shadows').onChange(v 
     directionalLight.castShadow = v;
     PARAMS.performance.shadowsEnabled = v;
 });
-perfFolder.add(PARAMS.performance, 'usePostProcessing').name('Post-processing (Bloom/FXAA)').onChange(() => {});
+perfFolder.add(PARAMS.performance, 'usePostProcessing').name('Post-processing (Bloom/FXAA)').onChange(() => { });
 
 const bezierFolder = gui.addFolder("Bezier surface");
 bezierFolder.add(PARAMS.bezier, "showHull").name("Show control hull").onChange((v) => {
@@ -1669,7 +1774,19 @@ function modifyCrowd(n) {
         for (let i = 0; i < n; i++) {
             let placed = false;
             for (let retry = 0; retry < MAX_PLACEMENT_RETRIES && !placed; retry++) {
-                const pos = walkableSampler.sampleRandom();
+                const sampleResult = walkableSampler.sampleRandom();
+                const pos = sampleResult instanceof THREE.Vector3 ? sampleResult : sampleResult.pos;
+                const wb = WALKABLE_WORLD_BOUNDS;
+                const m = PERSON_BOUNDARY_MARGIN;
+                const insideBounds = pos.x >= wb.min.x + m && pos.x <= wb.max.x - m &&
+                    pos.z >= wb.min.z + m && pos.z <= wb.max.z - m;
+                if (!insideBounds) continue;
+                let insideObstacle = false;
+                for (const obj of environmentObjects) {
+                    const box = obj.userData?.boundingBox;
+                    if (box && box.containsPoint(pos)) { insideObstacle = true; break; }
+                }
+                if (insideObstacle) continue;
                 const bounds = new THREE.Box3(
                     new THREE.Vector3(pos.x - PERSON_RADIUS, pos.y, pos.z - PERSON_RADIUS),
                     new THREE.Vector3(pos.x + PERSON_RADIUS, pos.y + CHARACTER_HEIGHT, pos.z + PERSON_RADIUS)
@@ -1677,7 +1794,10 @@ function modifyCrowd(n) {
                 const existing = octree.queryBounds(bounds);
                 if (existing.length === 0) {
                     const position = new THREE.Vector3(pos.x, pos.y + FEET_SURFACE_Y_OFFSET / 2, pos.z);
-                    const person = createCrowdPerson({ position, rotationY: Math.random() * Math.PI * 2 });
+                    const surfaceOpts = (sampleResult && typeof sampleResult === 'object' && !(sampleResult instanceof THREE.Vector3) && 'surfaceType' in sampleResult)
+                        ? { u: sampleResult.u, v: sampleResult.v, surfaceType: sampleResult.surfaceType, regionIndex: sampleResult.regionIndex }
+                        : {};
+                    const person = createCrowdPerson({ position, rotationY: Math.random() * Math.PI * 2, ...surfaceOpts });
                     person.bounds = bounds;
                     person.id = people.length;
                     person.facingAngle = person.rotationY;
@@ -1707,12 +1827,36 @@ function modifyCrowd(n) {
 const MAX_FORCE = 0.03;
 const MAX_SPEED = 0.25;
 const SURFACE_SAMPLE_EVERY = 2;        // call getSurfaceInfo at most every N frames per agent (close)
-const SURFACE_SAMPLE_EVERY_FAR = 10;    // distant agents: sample less often (LOD)
-const SURFACE_SAMPLE_DISTANCE = 0.5;   // or when moved this far in XZ from last sample
-const SURFACE_LOD_DISTANCE = 40;      // beyond this distance from camera, use SURFACE_SAMPLE_EVERY_FAR
+const SURFACE_SAMPLE_EVERY_FAR = 8;    // distant agents: sample less often (LOD); 8 balances correctness vs cost
+const SURFACE_SAMPLE_DISTANCE = 0.35;  // re-sample when moved this far in XZ (catch surface transitions sooner)
+const SURFACE_LOD_DISTANCE = 50;       // beyond this distance from camera, use SURFACE_SAMPLE_EVERY_FAR
+const PERSON_BOUNDARY_STRENGTH = 0.02; // steering force magnitude (match dragonfly)
+
+/** Nearest point on box surface. When point is inside, returns projection onto closest face; when outside, same as box.clampPoint. */
+function getClosestPointOnBoxSurface(box, point, target) {
+    if (!box.containsPoint(point)) return box.clampPoint(point, target);
+    const dxMin = point.x - box.min.x, dxMax = box.max.x - point.x;
+    const dyMin = point.y - box.min.y, dyMax = box.max.y - point.y;
+    const dzMin = point.z - box.min.z, dzMax = box.max.z - point.z;
+    const minD = Math.min(dxMin, dxMax, dyMin, dyMax, dzMin, dzMax);
+    const clampX = (v) => Math.max(box.min.x, Math.min(box.max.x, v));
+    const clampY = (v) => Math.max(box.min.y, Math.min(box.max.y, v));
+    const clampZ = (v) => Math.max(box.min.z, Math.min(box.max.z, v));
+    if (minD === dxMin) target.set(box.min.x, clampY(point.y), clampZ(point.z));
+    else if (minD === dxMax) target.set(box.max.x, clampY(point.y), clampZ(point.z));
+    else if (minD === dyMin) target.set(clampX(point.x), box.min.y, clampZ(point.z));
+    else if (minD === dyMax) target.set(clampX(point.x), box.max.y, clampZ(point.z));
+    else if (minD === dzMin) target.set(clampX(point.x), clampY(point.y), box.min.z);
+    else target.set(clampX(point.x), clampY(point.y), box.max.z);
+    return target;
+}
 
 function applyPhysics(person) {
     if (!person || !person.pos) return person;
+    if (person.state === 'SNAPPING') {
+        person.vel.set(0, 0, 0);
+        person.acc.set(0, 0, 0);
+    }
     _physicsForce.set(0, 0, 0);
     _physicsPush.set(0, 0, 0);
     _physicsSep.set(0, 0, 0);
@@ -1720,74 +1864,114 @@ function applyPhysics(person) {
     _physicsCoh.set(0, 0, 0);
     let count = 0;
 
-    // FLOCKING ALGORITHM (spatial: use octree so O(n*k) not O(n^2))
-    _flockBox.setFromCenterAndSize(person.pos, _flockBoxSize);
-    octree.queryBounds(_flockBox, _flockNeighbors);
-    _flockSeenIds.clear();
-    for (let k = 0; k < _flockNeighbors.length; k++) {
-        const other = _flockNeighbors[k];
-        if (other === person || _flockSeenIds.has(other.id) || other.state === "INSIDE") continue;
-        _flockSeenIds.add(other.id);
-        const dist = person.pos.distanceTo(other.pos);
-        if (dist > 0 && dist < FLOCK_RADIUS) {
-            if (PARAMS.flocking.sep.on) {
-                _physicsPush.subVectors(person.pos, other.pos).normalize().divideScalar(dist);
-                _physicsSep.add(_physicsPush);
+    if (person.state !== 'SNAPPING') {
+        // FLOCKING ALGORITHM (spatial: use octree so O(n*k) not O(n^2))
+        _flockBox.setFromCenterAndSize(person.pos, _flockBoxSize);
+        octree.queryBounds(_flockBox, _flockNeighbors);
+        _flockSeenIds.clear();
+        for (let k = 0; k < _flockNeighbors.length; k++) {
+            const other = _flockNeighbors[k];
+            if (other === person || _flockSeenIds.has(other.id) || other.state === "INSIDE") continue;
+            _flockSeenIds.add(other.id);
+            const dist = person.pos.distanceTo(other.pos);
+            if (dist > 0 && dist < FLOCK_RADIUS) {
+                if (PARAMS.flocking.sep.on) {
+                    _physicsPush.subVectors(person.pos, other.pos).normalize().divideScalar(dist);
+                    _physicsSep.add(_physicsPush);
+                }
+                if (PARAMS.flocking.ali.on) _physicsAli.add(other.vel);
+                if (PARAMS.flocking.coh.on) _physicsCoh.add(other.pos);
+                count++;
+                if (count >= FLOCK_MAX_NEIGHBORS) break;
             }
-            if (PARAMS.flocking.ali.on) _physicsAli.add(other.vel);
-            if (PARAMS.flocking.coh.on) _physicsCoh.add(other.pos);
-            count++;
-            if (count >= FLOCK_MAX_NEIGHBORS) break;
         }
-    }
 
-    if (count > 0) {
-        // Apply slider weights
-        if (PARAMS.flocking.sep.on) _physicsForce.add(_physicsSep.multiplyScalar(0.2 * PARAMS.flocking.sep.val));
-        if (PARAMS.flocking.ali.on) {
-            _physicsAli.divideScalar(count).normalize().multiplyScalar(MAX_SPEED).sub(person.vel);
-            _physicsForce.add(_physicsAli.multiplyScalar(0.05 * PARAMS.flocking.ali.val));
+        if (count > 0) {
+            // Apply slider weights
+            if (PARAMS.flocking.sep.on) _physicsForce.add(_physicsSep.multiplyScalar(0.2 * PARAMS.flocking.sep.val));
+            if (PARAMS.flocking.ali.on) {
+                _physicsAli.divideScalar(count).normalize().multiplyScalar(MAX_SPEED).sub(person.vel);
+                _physicsForce.add(_physicsAli.multiplyScalar(0.05 * PARAMS.flocking.ali.val));
+            }
+            if (PARAMS.flocking.coh.on) {
+                _physicsCoh.divideScalar(count).sub(person.pos).normalize().multiplyScalar(MAX_SPEED).sub(person.vel);
+                _physicsForce.add(_physicsCoh.multiplyScalar(0.05 * PARAMS.flocking.coh.val));
+            }
         }
-        if (PARAMS.flocking.coh.on) {
-            _physicsCoh.divideScalar(count).sub(person.pos).normalize().multiplyScalar(MAX_SPEED).sub(person.vel);
-            _physicsForce.add(_physicsCoh.multiplyScalar(0.05 * PARAMS.flocking.coh.val));
-        }
-    }
 
-    // avoid dunelm building (static objects)
-    const distDunelm = person.pos.distanceTo(dunelm.position);
-    if (distDunelm < dunelm.userData.radius) {
-        _physicsAvoid.subVectors(person.pos, dunelm.position).normalize().multiplyScalar((dunelm.userData.radius - distDunelm) * 0.5);
-        _physicsForce.add(_physicsAvoid);
-    }
-
-    // avoid lilies (same manner as Dunelm)
-    for (let L = 0; L < lilies.length; L++) {
-        _lilyWorldPos.set(lilies[L].x, lilies[L].y, lilies[L].z);
-        const distLily = Math.hypot(person.pos.x - _lilyWorldPos.x, person.pos.z - _lilyWorldPos.z);
-        if (distLily < LILY_AVOID_RADIUS) {
-            _physicsAvoid.subVectors(person.pos, _lilyWorldPos).normalize().multiplyScalar((LILY_AVOID_RADIUS - distLily) * 0.5);
+        // avoid dunelm building (static objects)
+        const distDunelm = person.pos.distanceTo(dunelm.position);
+        if (distDunelm < dunelm.userData.radius) {
+            _physicsAvoid.subVectors(person.pos, dunelm.position).normalize().multiplyScalar((dunelm.userData.radius - distDunelm) * 0.5);
             _physicsForce.add(_physicsAvoid);
         }
-    }
 
-    // Goal Seeking
-    if (person.target) {
-        _physicsDestination.subVectors(person.target, person.pos);
-        const dist = _physicsDestination.length();
-        _physicsDestination.normalize();
-        if (dist < 5) {
-            _physicsDestination.multiplyScalar(person.maxSpeed * (dist / 5));
-        } else {
-            _physicsDestination.multiplyScalar(person.maxSpeed);
+        // avoid lilies (only when person is near lily region to save compute)
+        if (lilyAvoidBounds && lilyAvoidBounds.containsPoint(person.pos)) {
+            for (let L = 0; L < lilies.length; L++) {
+                _lilyWorldPos.set(lilies[L].x, lilies[L].y, lilies[L].z);
+                const distLily = Math.hypot(person.pos.x - _lilyWorldPos.x, person.pos.z - _lilyWorldPos.z);
+                if (distLily < LILY_AVOID_RADIUS) {
+                    _physicsAvoid.subVectors(person.pos, _lilyWorldPos).normalize().multiplyScalar((LILY_AVOID_RADIUS - distLily) * 0.5);
+                    _physicsForce.add(_physicsAvoid);
+                }
+            }
         }
-        _physicsClampResult.subVectors(_physicsDestination, person.vel).clampLength(0, MAX_FORCE);
-        _physicsForce.add(_physicsClampResult);
-    } else if (person.state === 'WANDER') {
-        _physicsWanderVec.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize().multiplyScalar(MAX_FORCE * 0.8);
-        _physicsForce.add(_physicsWanderVec);
-        if (person.pos.length() > 120) {
-            _physicsWanderVec.add(person.pos.clone().multiplyScalar(-0.02)); // boundary
+
+        // Avoid environment obstacles (precomputed Box3 per object); push out when inside
+        const PERSON_ENV_AVOID_MARGIN = 0.5;
+        const PERSON_ENV_AVOID_STRENGTH = 0.5;
+        const PERSON_ENV_INSIDE_STRENGTH = 0.2;
+        for (let i = 0; i < environmentObjects.length; i++) {
+            const obj = environmentObjects[i];
+            const box = obj.userData.boundingBox;
+            if (!box) continue;
+            if (box.containsPoint(person.pos)) {
+                getClosestPointOnBoxSurface(box, person.pos, _physicsClampedPoint);
+                _physicsAvoid.subVectors(person.pos, _physicsClampedPoint).normalize().multiplyScalar(PERSON_ENV_INSIDE_STRENGTH);
+                _physicsForce.add(_physicsAvoid);
+            } else {
+                box.clampPoint(person.pos, _physicsClampedPoint);
+                const distEnv = person.pos.distanceTo(_physicsClampedPoint);
+                if (distEnv < PERSON_ENV_AVOID_MARGIN && distEnv > 0.001) {
+                    _physicsAvoid.subVectors(person.pos, _physicsClampedPoint)
+                        .normalize()
+                        .multiplyScalar((PERSON_ENV_AVOID_MARGIN - distEnv) * PERSON_ENV_AVOID_STRENGTH);
+                    _physicsForce.add(_physicsAvoid);
+                }
+            }
+        }
+
+        // Boundary containment: steer toward walkable center when near world bounds or at surface edge (like dragonfly)
+        const bounds = WALKABLE_WORLD_BOUNDS;
+        const margin = PERSON_BOUNDARY_MARGIN;
+        const nearBoundary = person.pos.x < bounds.min.x + margin || person.pos.x > bounds.max.x - margin ||
+            person.pos.z < bounds.min.z + margin || person.pos.z > bounds.max.z - margin;
+        if (nearBoundary) {
+            const centerX = (bounds.min.x + bounds.max.x) / 2;
+            const centerZ = (bounds.min.z + bounds.max.z) / 2;
+            _physicsBoundarySteer.set(centerX, 0, centerZ).sub(person.pos).normalize().multiplyScalar(PERSON_BOUNDARY_STRENGTH);
+            _physicsForce.add(_physicsBoundarySteer);
+        }
+
+        // Goal Seeking
+        if (person.target) {
+            _physicsDestination.subVectors(person.target, person.pos);
+            const dist = _physicsDestination.length();
+            _physicsDestination.normalize();
+            if (dist < 5) {
+                _physicsDestination.multiplyScalar(person.maxSpeed * (dist / 5));
+            } else {
+                _physicsDestination.multiplyScalar(person.maxSpeed);
+            }
+            _physicsClampResult.subVectors(_physicsDestination, person.vel).clampLength(0, MAX_FORCE);
+            _physicsForce.add(_physicsClampResult);
+        } else if (person.state === 'WANDER') {
+            _physicsWanderVec.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize().multiplyScalar(MAX_FORCE * 0.8);
+            if (person.pos.length() > 120) {
+                _physicsWanderVec.add(person.pos.clone().multiplyScalar(-0.02)); // boundary
+            }
+            _physicsForce.add(_physicsWanderVec);
         }
     }
 
@@ -1809,12 +1993,17 @@ function applyPhysics(person) {
 
     person.vel.clampLength(0, person.maxSpeed);
 
+    const oldPosX = person.pos.x;
+    const oldPosZ = person.pos.z;
+
+    // Add velocity to position
     _physicsCandidatePos.copy(person.pos).add(person.vel);
     const distToCam = person.pos.distanceTo(camera.position);
     const surfaceSampleEvery = distToCam > SURFACE_LOD_DISTANCE ? SURFACE_SAMPLE_EVERY_FAR : SURFACE_SAMPLE_EVERY;
     const shouldSample = person._surfaceSampleFrame === undefined ||
         (frameCount - person._surfaceSampleFrame >= surfaceSampleEvery) ||
         (person._lastSurfaceX !== undefined && Math.hypot(_physicsCandidatePos.x - person._lastSurfaceX, _physicsCandidatePos.z - person._lastSurfaceZ) > SURFACE_SAMPLE_DISTANCE);
+
     let info;
     if (shouldSample) {
         info = walkableSampler.getSurfaceInfo(_physicsCandidatePos.x, _physicsCandidatePos.z, person._surfaceCache);
@@ -1826,12 +2015,33 @@ function applyPhysics(person) {
     } else {
         info = { inside: !!person._lastSurfaceInside, y: person._lastSurfaceY != null ? person._lastSurfaceY : null };
     }
+
     if (info.inside && info.y !== null) {
+        person._atSurfaceEdge = false;
         person.pos.set(_physicsCandidatePos.x, info.y + FEET_SURFACE_Y_OFFSET / 2, _physicsCandidatePos.z);
         if (person.prevPosition) person.prevPosition.copy(person.pos);
     } else {
-        person.vel.multiplyScalar(-0.2);
+        // Candidate step was off walkable (e.g. pavement edge). Don't apply move; steer back onto surface.
+        person._atSurfaceEdge = true;
+        person.vel.multiplyScalar(0.6);
+        const speed = person.vel.length();
+        const nudgeThreshold = person.maxSpeed * 0.08;
+        if (speed < nudgeThreshold && person.state === 'WANDER') {
+            person.vel.set(
+                (Math.random() - 0.5) * 2 * nudgeThreshold,
+                0,
+                (Math.random() - 0.5) * 2 * nudgeThreshold
+            );
+        } else if (speed > 0.01) {
+            // Steer back toward the walkable surface (reverse direction)
+            const nudgeSpeed = person.maxSpeed * 0.15;
+            person.vel.normalize().negate().multiplyScalar(nudgeSpeed);
+        }
+        person.vel.clampLength(0, person.maxSpeed);
     }
+
+    person._displacement = Math.hypot(person.pos.x - oldPosX, person.pos.z - oldPosZ);
+
     person.acc.set(0, 0, 0);
 
     if (person.state === 'SNAPPING') {
@@ -1843,6 +2053,7 @@ function applyPhysics(person) {
 
 function applyDragonflyPhysics(dragonfly) {
     if (!dragonfly || !dragonfly.pos) return dragonfly;
+    _dfPhysicsForce.set(0, 0, 0);
     dragonfly.acc.set(0, 0, 0);
 
     const maxSpeed = dragonfly.maxSpeed * (PARAMS.dragonflies.maxSpeed / 0.35);
@@ -1854,6 +2065,7 @@ function applyDragonflyPhysics(dragonfly) {
     _dfFlockBox.setFromCenterAndSize(dragonfly.pos, _dfFlockBoxSize);
     dragonflyOctree.queryBounds(_dfFlockBox, _dfFlockNeighbors);
     _dfSeenIds.clear();
+
     for (let k = 0; k < _dfFlockNeighbors.length; k++) {
         const other = _dfFlockNeighbors[k];
         if (other === dragonfly || _dfSeenIds.has(other.id)) continue;
@@ -1865,38 +2077,44 @@ function applyDragonflyPhysics(dragonfly) {
             sepCount++;
         }
     }
+    // Factor force by number of dragonflies in the neighbourhood
     if (sepCount > 0) {
         _dfSep.divideScalar(sepCount).normalize().multiplyScalar(maxSpeed).sub(dragonfly.vel);
-        dragonfly.acc.add(_dfSteer.copy(_dfSep).clampLength(0, maxForce).multiplyScalar(2));
+        _dfPhysicsForce.add(_dfSteer.copy(_dfSep).clampLength(0, maxForce).multiplyScalar(2));
     }
 
-    // Avoid Dunelm
-    const dunelmPos = dunelm.position;
-    const distDunelm = dragonfly.pos.distanceTo(dunelmPos);
-    if (distDunelm < dunelm.userData.radius) {
-        _dfAvoid.subVectors(dragonfly.pos, dunelmPos).normalize().multiplyScalar((dunelm.userData.radius - distDunelm) * 0.5);
-        dragonfly.acc.add(_dfAvoid);
-    }
-
-    // Avoid lilies
-    for (let L = 0; L < lilies.length; L++) {
-        _dfAvoid.set(dragonfly.pos.x - lilies[L].x, dragonfly.pos.y - lilies[L].y, dragonfly.pos.z - lilies[L].z);
-        const distLily = _dfAvoid.length();
-        if (distLily < LILY_AVOID_RADIUS && distLily > 0) {
-            _dfAvoid.normalize().multiplyScalar((LILY_AVOID_RADIUS - distLily) * 0.5);
-            dragonfly.acc.add(_dfAvoid);
+    // Avoid environment obstacles (precomputed Box3 per object)
+    const ENV_AVOID_MARGIN = 1;
+    const ENV_AVOID_STRENGTH = 0.5;
+    for (let i = 0; i < environmentObjects.length; i++) {
+        const obj = environmentObjects[i];
+        const box = obj.userData.boundingBox;
+        if (!box) continue;
+        box.clampPoint(dragonfly.pos, _dfClampedPoint);
+        const dist = dragonfly.pos.distanceTo(_dfClampedPoint);
+        if (dist < ENV_AVOID_MARGIN && dist > 0.001) {
+            _dfAvoid.subVectors(dragonfly.pos, _dfClampedPoint)
+                .normalize()
+                .multiplyScalar((ENV_AVOID_MARGIN - dist) * ENV_AVOID_STRENGTH);
+            _dfPhysicsForce.add(_dfAvoid);
         }
     }
 
-    // Boundary containment: apply steering when approaching (XZ from world bounds, Y from flight bounds)
+    // Boundary containment: force toward center when near any face (like person WANDER)
     const bounds = WALKABLE_WORLD_BOUNDS;
     const margin = 5;
-    if (dragonfly.pos.x < bounds.min.x + margin) dragonfly.acc.x += 0.5;
-    if (dragonfly.pos.x > bounds.max.x - margin) dragonfly.acc.x -= 0.5;
-    if (dragonfly.pos.z < bounds.min.z + margin) dragonfly.acc.z += 0.5;
-    if (dragonfly.pos.z > bounds.max.z - margin) dragonfly.acc.z -= 0.5;
-    if (dragonfly.pos.y < DRAGONFLY_MIN_Y + 1) dragonfly.acc.y += 0.3;
-    if (dragonfly.pos.y > DRAGONFLY_MAX_Y - 1) dragonfly.acc.y -= 0.3;
+    const BOUNDARY_STRENGTH = 0.02;
+    const nearBoundary = dragonfly.pos.x < bounds.min.x + margin || dragonfly.pos.x > bounds.max.x - margin ||
+        dragonfly.pos.z < bounds.min.z + margin || dragonfly.pos.z > bounds.max.z - margin ||
+        dragonfly.pos.y < DRAGONFLY_MIN_Y + margin || dragonfly.pos.y > DRAGONFLY_MAX_Y - margin;
+    if (nearBoundary) {
+        _dfSteer.set(
+            (bounds.min.x + bounds.max.x) / 2,
+            (DRAGONFLY_MIN_Y + DRAGONFLY_MAX_Y) / 2,
+            (bounds.min.z + bounds.max.z) / 2
+        ).sub(dragonfly.pos).normalize().multiplyScalar(BOUNDARY_STRENGTH);
+        _dfPhysicsForce.add(_dfSteer);
+    }
 
     // Seek/Arrive (A* waypoint or cursor target) vs Wander
     const target = dragonfly.path && dragonfly.path.length > 0 && dragonfly.pathIndex < dragonfly.path.length
@@ -1916,27 +2134,16 @@ function applyDragonflyPhysics(dragonfly) {
                 _dfDesired.multiplyScalar(maxSpeed);
             }
             _dfSteer.subVectors(_dfDesired, dragonfly.vel).clampLength(0, maxForce);
-            dragonfly.acc.add(_dfSteer);
+            _dfPhysicsForce.add(_dfSteer);
         }
     } else {
-        // Wander: "carrot on a stick"
-        const velLen = dragonfly.vel.length();
-        if (velLen > 0.01) {
-            _dfWanderCentre.copy(dragonfly.vel).normalize().multiplyScalar(WANDER_OFFSET_DIST);
-        } else {
-            _dfWanderCentre.set(1, 0, 0);
-        }
-        dragonfly.wanderTheta += (Math.random() - 0.5) * WANDER_JITTER;
-        _dfWanderDisplacement.set(Math.cos(dragonfly.wanderTheta), (Math.random() - 0.5) * 0.3, Math.sin(dragonfly.wanderTheta)).multiplyScalar(WANDER_CIRCLE_RADIUS);
-        _dfWanderCentre.add(_dfWanderDisplacement);
-        _dfDesired.copy(dragonfly.pos).add(_dfWanderCentre);
-        _dfSteer.subVectors(_dfDesired, dragonfly.pos).normalize().multiplyScalar(maxSpeed).sub(dragonfly.vel).clampLength(0, maxForce);
-        dragonfly.acc.add(_dfSteer);
+        // Wander: random 3D force (like person WANDER)
+        _dfRandomDir.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize()
+            .multiplyScalar(maxForce * 0.8);
+        _dfPhysicsForce.add(_dfRandomDir);
     }
 
-    // Gentle vertical bobbing (wander in Y)
-    dragonfly.acc.y += (Math.random() - 0.5) * 0.02;
-
+    dragonfly.acc.add(_dfPhysicsForce);
     dragonfly.vel.add(dragonfly.acc);
     dragonfly.vel.clampLength(0, maxSpeed);
     dragonfly.pos.add(dragonfly.vel);
@@ -1980,7 +2187,7 @@ function applyDragonflyPhysics(dragonfly) {
 // SNAPPING phase lengths (frames); total ~0.7 s at 60fps
 const SNAP_ARM_UP_DURATION = 16;
 const SNAP_FLASH_FRAME = 17;
-const SNAP_ARM_DOWN_START = 24;
+const SNAP_ARM_DOWN_START = 35;
 const SNAP_ARM_DOWN_END = 38;
 const SNAP_ARM_UP_ANGLE = -1.2;
 const SNAP_END_FRAME = 40;  // return to WANDER after this
@@ -1989,7 +2196,7 @@ const SEEK_LILY_COOLDOWN_FRAMES = 150;
 
 function animatePerson(person) {
     if (!person.mesh) {
-        if (person.vel.length() > 0.02) {
+        if ((person._displacement || 0) > 0.01) {
             const newFacing = Math.atan2(person.vel.x, person.vel.z);
             let turnRate = newFacing - person.facingAngle;
             while (turnRate > Math.PI) turnRate -= 2 * Math.PI;
@@ -2001,13 +2208,13 @@ function animatePerson(person) {
         }
         return;
     }
-    person.mesh.position.copy(person.pos);
-    person.mesh.position.y = person.pos.y;
+    // Position is interpolated in the render pass for smooth movement; rotation/anim here
 
     if (person.state === 'SNAPPING') {
         const snapTimer = person.snapTimer || 0;
         const ang = Math.atan2(person.vel.x, person.vel.z);
-        person.mesh.quaternion.slerp(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), ang), 0.1);
+        _animatePersonQuat.setFromAxisAngle(_animatePersonAxisY, ang);
+        person.mesh.quaternion.slerp(_animatePersonQuat, 0.1);
         if (snapTimer < SNAP_ARM_UP_DURATION) {
             const u = snapTimer / SNAP_ARM_UP_DURATION;
             person.parts.armRight.rotation.x = SNAP_ARM_UP_ANGLE * u;
@@ -2027,9 +2234,10 @@ function animatePerson(person) {
         return;
     }
 
-    if (person.vel.length() > 0.02) {
+    if ((person._displacement || 0) > 0.01) {
         const ang = Math.atan2(person.vel.x, person.vel.z);
-        person.mesh.quaternion.slerp(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), ang), 0.1);
+        _animatePersonQuat.setFromAxisAngle(_animatePersonAxisY, ang);
+        person.mesh.quaternion.slerp(_animatePersonQuat, 0.1);
         const t = Date.now() * 0.02;
         person.parts.legLeft.rotation.x = Math.sin(t) * 0.6;
         person.parts.legRight.rotation.x = -Math.sin(t) * 0.6;
@@ -2063,13 +2271,14 @@ function updateDecision(person) {
                 _lilyTargetPos.set(lilies[idx].x, lilies[idx].y, lilies[idx].z);
                 person.target = _lilyTargetPos.clone().add(new THREE.Vector3((Math.random() - 0.5) * 4, 0, (Math.random() - 0.5) * 4));
             }
-        } else if (Math.random() < 0.0008) {
+
+        } /*else if (Math.random() < 0.0008) {
             person.state = "FLOW";
             person.target = BRIDGE_FLOW_TARGET.clone();
         } else if (Math.random() < 0.0008) {
             person.state = "QUEUING";
             person.target = DUNELM_QUEUE_TARGET.clone();
-        }
+        }*/
     } else if (person.state === "SEEK_LILY") {
         if (person.target != null && person.pos.distanceTo(person.target) < 10) {
             person.state = "SNAPPING";
@@ -2078,11 +2287,11 @@ function updateDecision(person) {
             person.snapTimer = 0;
             person.snapFlashDone = false;
         }
-    } else if (person.state === "FLOW") {
-        if (person.target != null && person.pos.distanceTo(person.target) < 8) {
-            person.state = "WANDER";
-            person.target = null;
-        }
+        /*} else if (person.state === "FLOW") {
+            if (person.target != null && person.pos.distanceTo(person.target) < 8) {
+                person.state = "WANDER";
+                person.target = null;
+            }*/
     }
     // QUEUING -> INSIDE is handled in animate loop when person is within DUNELM_DOOR_OPEN_RADIUS
     return person;
@@ -2096,37 +2305,34 @@ function animate() {
     frustumMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     cameraFrustum.setFromProjectionMatrix(frustumMatrix);
 
-    if (frameCount % 10 === 0) {
+    if (frameCount % 20 === 0) {
         treeElement.update(camera);
-    }
-
-    // Update cursor world position for dragonfly follow mode (raycast onto y=5 plane)
-    if (PARAMS.dragonflies.followCursor && frameCount % 10 === 0) {
-        dragonflyRaycaster.setFromCamera(dragonflyMouseNDC, camera);
-        const cursorIntersect = dragonflyRaycaster.ray.intersectPlane(dragonflyPlane, cursorWorldPos);
-        if (cursorIntersect) cursorWorldPos.copy(cursorIntersect);
     }
 
     let _t0;
     if (ENABLE_PROFILING) _t0 = performance.now();
 
-    // Update person bounds; incremental octree update (only re-insert movers); skip INSIDE
-    const OCTREE_MOVE_EPS_SQ = 1e-6;
-    for (let i = 0; i < people.length; i++) {
-        const person = people[i];
-        if (person.state === "INSIDE") continue;
-        person.bounds.min.set(person.pos.x - PERSON_RADIUS, person.pos.y, person.pos.z - PERSON_RADIUS);
-        person.bounds.max.set(person.pos.x + PERSON_RADIUS, person.pos.y + CHARACTER_HEIGHT, person.pos.z + PERSON_RADIUS);
-        if (person.pos.distanceToSquared(person._lastOctreePos) > OCTREE_MOVE_EPS_SQ) {
-            octree.remove(person);
-            octree.insert(person);
-            person._lastOctreePos.copy(person.pos);
+    // Update person bounds; incremental octree update every 4 frames to save compute
+    if (frameCount % 4 === 0) {
+        const OCTREE_MOVE_EPS_SQ = 1e-6;
+        for (let i = 0; i < people.length; i++) {
+            const person = people[i];
+            if (person.state === "INSIDE") continue;
+            person.bounds.min.set(person.pos.x - PERSON_RADIUS, person.pos.y, person.pos.z - PERSON_RADIUS);
+            person.bounds.max.set(person.pos.x + PERSON_RADIUS, person.pos.y + CHARACTER_HEIGHT, person.pos.z + PERSON_RADIUS);
+            if (person.pos.distanceToSquared(person._lastOctreePos) > OCTREE_MOVE_EPS_SQ) {
+                octree.remove(person);
+                octree.insert(person);
+                person._lastOctreePos.copy(person.pos);
+            }
         }
     }
 
     const CULL_DISTANCE = 100;  // cull characters beyond 100m (no far box LOD)
     const LOD_CLOSE = 40;      // 0-40m: individual mesh with phone, 40-100m: instanced medium
-    const SHADOW_DISTANCE = 15; // only characters within this distance of camera cast shadows
+    const SHADOW_DISTANCE = 20; // only characters within this distance of camera cast shadows
+    const PERSON_POS_INTERP = 0.2; // lerp factor for smooth position interpolation (0=no move, 1=instant snap)
+    const MAX_DISPLAY_Y_DELTA = 0.5; // clamp _displayPos.y to pos.y ± this to prevent slow float
     const camPos = camera.position;
 
     // Door animation and INSIDE transition (QUEUING person within radius -> INSIDE)
@@ -2171,39 +2377,48 @@ function animate() {
         }
     }
 
-    // Apply physics and decision to all people (every 2 frames to save CPU); skip INSIDE
-    if (frameCount % 2 === 0) {
-        for (let i = 0; i < people.length; i++) {
-            let person = people[i];
-            if (!person || !person.pos || person.state === "INSIDE") continue;
-            if (frameCount % SNAP_END_FRAME === 0) {
-                if ((person.getPhone() != null) && (person.state !== "SNAPPING") && (Math.random() < 0.05)) {
-                    person.state = "SNAPPING";
-                    person.snapTimer = 0;
-                    person.snapFlashDone = false;
-                }
+    // Apply physics and decision to people (every 2 frames, batched for compute savings)
+    const PEOPLE_PER_BATCH = Math.ceil(people.length / 2);
+    const batchNumber = Math.floor(frameCount / 2);
+    const startIdx = (batchNumber * PEOPLE_PER_BATCH) % people.length;
+    for (let k = 0; k < PEOPLE_PER_BATCH; k++) {
+        const i = (startIdx + k) % people.length;
+        let person = people[i];
+        if (!person || !person.pos || person.state === "INSIDE") continue;
+        if (frameCount % SNAP_END_FRAME === 0) {
+            if ((person.getPhone() != null) && (person.state !== "SNAPPING") && (Math.random() < 0.05)) {
+                person.state = "SNAPPING";
+                person.snapTimer = 0;
+                person.snapFlashDone = false;
             }
-            person = updateDecision(person);
-            person = applyPhysics(person);
-            animatePerson(person);
+        }
+        person = updateDecision(person);
+        person = applyPhysics(person);
+        animatePerson(person);
+    }
+
+
+    // Dragonfly physics and octree: update every other frame to save compute
+    if (frameCount % 2 === 0) {
+        for (let i = 0; i < dragonflies.length; i++) {
+            const dragonfly = dragonflies[i];
+            applyDragonflyPhysics(dragonfly);
+        }
+        const DF_OCTREE_MOVE_EPS_SQ = 1e-6;
+        for (let i = 0; i < dragonflies.length; i++) {
+            const df = dragonflies[i];
+            df.bounds.min.set(df.pos.x - df.forceRadius, df.pos.y - df.forceRadius, df.pos.z - df.forceRadius);
+            df.bounds.max.set(df.pos.x + df.forceRadius, df.pos.y + df.forceRadius, df.pos.z + df.forceRadius);
+            if (df.pos.distanceToSquared(df._lastOctreePos) > DF_OCTREE_MOVE_EPS_SQ) {
+                dragonflyOctree.remove(df);
+                dragonflyOctree.insert(df);
+                df._lastOctreePos.copy(df.pos);
+            }
         }
     }
 
-    // Dragonfly octree: update bounds and incremental re-insert for movers
-    const DF_OCTREE_MOVE_EPS_SQ = 1e-6;
-    for (let i = 0; i < dragonflies.length; i++) {
-        const df = dragonflies[i];
-        df.bounds.min.set(df.pos.x - df.forceRadius, df.pos.y - df.forceRadius, df.pos.z - df.forceRadius);
-        df.bounds.max.set(df.pos.x + df.forceRadius, df.pos.y + df.forceRadius, df.pos.z + df.forceRadius);
-        if (df.pos.distanceToSquared(df._lastOctreePos) > DF_OCTREE_MOVE_EPS_SQ) {
-            dragonflyOctree.remove(df);
-            dragonflyOctree.insert(df);
-            df._lastOctreePos.copy(df.pos);
-        }
-    }
-
-    // Dragonfly A* path recomputation (every 60 frames when follow cursor enabled)
-    if (PARAMS.dragonflies.followCursor && dragonflies.length > 0 && frameCount % 60 === 0) {
+    // Dragonfly A* path recomputation when follow cursor enabled (staggered to avoid main-thread freeze)
+    if (PARAMS.dragonflies.followCursor && dragonflies.length > 0 && frameCount % 6 === 0) {
         const isLeafBlocked = (leaf) => {
             const leafCentre = leaf.bounds.getCenter(_astarLeafCenter);
             const info = walkableSampler.getSurfaceInfo(leafCentre.x, leafCentre.z);
@@ -2217,17 +2432,14 @@ function animate() {
             }
             return false;
         };
-        for (let i = 0; i < dragonflies.length; i++) {
+        const DF_ASTAR_PER_BATCH = 2;
+        const startIdx = (Math.floor(frameCount / 6) * DF_ASTAR_PER_BATCH) % dragonflies.length;
+        for (let k = 0; k < DF_ASTAR_PER_BATCH; k++) {
+            const i = (startIdx + k) % dragonflies.length;
             const dragonfly = dragonflies[i];
             dragonfly.path = findPathOctree(dragonflyOctree, dragonfly.pos, cursorWorldPos, isLeafBlocked);
             dragonfly.pathIndex = 0;
         }
-    }
-
-    // Dragonfly physics (every frame)
-    for (let i = 0; i < dragonflies.length; i++) {
-        const dragonfly = dragonflies[i];
-        applyDragonflyPhysics(dragonfly);
     }
 
     if (ENABLE_PROFILING) {
@@ -2301,12 +2513,16 @@ function animate() {
         }
     }
 
-    // Only characters within SHADOW_DISTANCE of camera cast shadows
+    // Only characters within SHADOW_DISTANCE of camera cast shadows; only traverse when state changes
     for (let i = 0; i < _listClose.length; i++) {
         const p = _listClose[i];
         if (p.mesh) {
-            const cast = p.pos.distanceTo(camPos) < SHADOW_DISTANCE;
-            p.mesh.traverse((o) => { if (o.isMesh) o.castShadow = cast; });
+            const inRange = p.pos.distanceTo(camPos) < SHADOW_DISTANCE;
+            if (p._castShadow !== inRange) {
+                p._castShadow = inRange;
+                p.mesh.traverse((o) => { if (o.isMesh) o.castShadow = inRange; });
+            }
+            p.mesh.position.lerp(p.pos, PERSON_POS_INTERP);
         }
     }
 
@@ -2318,7 +2534,10 @@ function animate() {
         }
         for (let i = 0; i < list.length; i++) {
             const person = list[i];
-            _dummyPosition.copy(person.pos);
+            if (!person._displayPos) person._displayPos = person.pos.clone();
+            person._displayPos.lerp(person.pos, PERSON_POS_INTERP);
+            person._displayPos.y = Math.max(person.pos.y - MAX_DISPLAY_Y_DELTA, Math.min(person.pos.y + MAX_DISPLAY_Y_DELTA, person._displayPos.y));
+            _dummyPosition.copy(person._displayPos);
             _dummyQuaternion.setFromAxisAngle(_dummyAxisY, person.facingAngle);
             _dummyQuatBank.setFromAxisAngle(_dummyAxisX, person.bankAngle ?? 0);
             _dummyQuaternion.multiply(_dummyQuatBank);

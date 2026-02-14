@@ -92,7 +92,7 @@ export class Figure {
             arm.rotation.z = Math.PI / 12 * m;
 
             if (i === phoneArm) {
-                const phone = createPhone(0, 0, 0, { width: 0.24, height: 0.48, depth: 0.04, flashLight: true });
+                const phone = createPhone(0, 0, 0, { width: 0.24, height: 0.48, depth: 0.04, flashLight: true, flashWidth: 0.5, flashHeight: 0.5 });
                 // Place phone so its lower end (bottom) is at the arm's hand; z=0.14 to sit in front of the arm and avoid z-fight
                 phone.position.set(0, -0.5 + 0.24 / 2, 0.14);
                 this._phone = phone;
@@ -130,7 +130,7 @@ export class Figure {
             phone.setFlashOn();
             setTimeout(() => {
                 phone.setFlashOff();
-            }, 500);
+            }, 2000);
         }
     }
 
@@ -729,6 +729,16 @@ export function createCrowdPerson(options = {}) {
     const rotationY = position ? (options.rotationY ?? Math.random() * Math.PI * 2) : Math.random() * Math.PI * 2;
     const hue = Math.random() * 360;
     const bodyColor = new THREE.Color().setHSL(hue / 360, 0.6, 0.62);
+    const surfaceType = options.surfaceType;
+    const u = options.u;
+    const v = options.v;
+    const regionIndex = options.regionIndex;
+    const _surfaceCache = {
+        regionIndex: regionIndex ?? 0,
+        ...(surfaceType && { surfaceType }),
+        ...(typeof u === 'number' && { u }),
+        ...(typeof v === 'number' && { v })
+    };
     const person = {
         pos,
         prevPosition: position ? position.clone() : pos.clone(),
@@ -747,7 +757,7 @@ export function createCrowdPerson(options = {}) {
         bodyColor,
         getPhone: () => null,
         triggerFlash: () => {},
-        _surfaceCache: { regionIndex: 0 },
+        _surfaceCache,
         _lastOctreePos: position ? position.clone() : pos.clone()
     };
     return person;

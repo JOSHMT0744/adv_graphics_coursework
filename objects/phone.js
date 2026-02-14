@@ -12,7 +12,7 @@ const sharedFlashMatOff = new THREE.MeshStandardMaterial({
 const sharedFlashMatOn = new THREE.MeshStandardMaterial({
     color: 0x444444,
     emissive: 0xffffdd,
-    emissiveIntensity: 6,
+    emissiveIntensity: 15,
     side: THREE.DoubleSide,
     toneMapped: false,
 });
@@ -57,13 +57,19 @@ class Phone extends THREE.Group {
         this.add(flashMesh);
         this._flashMesh = flashMesh;
 
-        // PointLight on the -Z (front) face. Always in the scene graph; we only toggle intensity so the renderer sees it.
+        // SpotLight on the -Z (front) face: visible beam emanating from the phone (slower decay than PointLight).
         this._flashLight = null;
+        this._flashTarget = null;
         if (flashLight) {
-            const light = new THREE.PointLight(0xffffdd, 0, 0, 2);
+            const light = new THREE.SpotLight(0xffffdd, 0, 12, Math.PI / 4, 0.3, 1);
             light.position.set(width / 4, height / 2 - 0.08, -depth / 2 - 0.01);
+            const target = new THREE.Object3D();
+            target.position.set(width / 4, height / 2 - 0.08, -depth / 2 - 10);
             this.add(light);
+            this.add(target);
+            light.target = target;
             this._flashLight = light;
+            this._flashTarget = target;
         }
 
         this.position.set(x, y, z);
@@ -72,7 +78,7 @@ class Phone extends THREE.Group {
     setFlashOn() {
         this._flashMesh.material = sharedFlashMatOn;
         if (this._flashLight) {
-            this._flashLight.intensity = 8;
+            this._flashLight.intensity = 20;
         }
     }
 

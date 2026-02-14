@@ -191,7 +191,7 @@ function addWindowGrid(parentGroup, face, blockW, blockH, blockD, countX, countY
             pos.add(normal.clone().multiplyScalar(WINDOW_FACE_OFFSET));
 
             _windowDummy.position.copy(pos);
-            _windowDummy.quaternion.setFromEuler(0, rotY, 0);
+            _windowDummy.quaternion.setFromEuler(new THREE.Euler(0, rotY, 0, 'XYZ'));
             _windowDummy.scale.set(winW, winH, 1);
             _windowDummy.updateMatrix();
             instanced.setMatrixAt(idx++, _windowDummy.matrix);

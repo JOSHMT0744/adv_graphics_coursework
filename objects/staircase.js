@@ -57,10 +57,9 @@ export function createStaircase(startPos, endPos, options = {}) {
     stepsInstanced.instanceMatrix.needsUpdate = true;
     group.add(stepsInstanced);
 
-    // Side slabs: one InstancedMesh (2 instances)
+    // Side slabs: one InstancedMesh (2 instances); slab length equals path length
     const slopeAngle = Math.atan2(dy, horizontalDist);
-    const slabLength = Math.sqrt(horizontalDist * horizontalDist + dy * dy);
-    const slabGeo = new THREE.BoxGeometry(slabThickness, slabHeight, slabLength);
+    const slabGeo = new THREE.BoxGeometry(slabThickness, slabHeight, pathLength);
     const slabsInstanced = new THREE.InstancedMesh(slabGeo, slabMaterial, 2);
 
     const midX = (startPos.x + endPos.x) / 2;

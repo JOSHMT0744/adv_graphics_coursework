@@ -67,11 +67,11 @@ export function getDragonflyGeometryLOD() {
  * Emissive material for dragonfly glow (works with bloom pass).
  * @returns {THREE.Material}
  */
-export function getDragonflyMaterial() {
+export function getDragonflyMaterial(colour=0x44ffaa, emissive=0xf00ed2) {
     if (_cachedMaterial) return _cachedMaterial;
     _cachedMaterial = new THREE.MeshStandardMaterial({
-        color: 0x44ffaa,
-        emissive: 0x22ff88,
+        color: colour,
+        emissive: emissive,
         emissiveIntensity: 1.5,
         roughness: 0.3,
         metalness: 0.1,
@@ -95,7 +95,7 @@ export function createDragonfly(options = {}) {
     const maxForce = DEFAULT_MAX_FORCE * (0.8 + Math.random() * 0.4);
 
     const hue = 140 + Math.random() * 40;
-    const color = new THREE.Color().setHSL(hue / 360, 0.7, 0.65);
+    const color = new THREE.Color().setHSL(hue / 360, 0.7, 0.7);
 
     const vel = new THREE.Vector3(
         (Math.random() - 0.5) * maxSpeed * 0.5,
@@ -118,7 +118,6 @@ export function createDragonfly(options = {}) {
         maxSpeed,
         maxForce,
         forceRadius: FORCE_RADIUS,
-        wanderTheta: Math.random() * Math.PI * 2,
         flyHeight: pos.y,
         path: [],
         pathIndex: 0,
