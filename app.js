@@ -342,7 +342,7 @@ nearHill.position.set(0, -55, -65, { endHeight: 55 })
 scene.add(nearHill);
 
 
-// Far-hill billboard trees (instanced planes that face the camera; frustum-culled)
+// Far-hill billboard trees
 const FAR_HILL_TREE_BOUNDS = { xMin: -95, xMax: 95, zMin: -155, zMax: -115, yFallback: -55 };
 const FAR_HILL_TREE_WIDTH = 4;
 const FAR_HILL_TREE_HEIGHT = 12;
@@ -357,19 +357,18 @@ const farHillTreeMaterial = new THREE.MeshStandardMaterial({
 });
 
 const FAR_HILL_TREE_MAX_COUNT = 500;
-const FAR_HILL_CULL_DISTANCE = 80;  // tighter than character cull; rely on distance only (no per-tree frustum check)
 const farHillBillboardInstancedMesh = new THREE.InstancedMesh(
     farHillTreeGeometry,
     farHillTreeMaterial,
     FAR_HILL_TREE_MAX_COUNT
 );
 farHillBillboardInstancedMesh.count = 0;
+farHillBillboardInstancedMesh.frustumCulled = false;  // always draw; billboards are cheap
 scene.add(farHillBillboardInstancedMesh);
 
 const farHillRaycaster = new THREE.Raycaster();
 const farHillRayOrigin = new THREE.Vector3();
 const farHillRayDirection = new THREE.Vector3(0, -1, 0);
-const _farHillVisibleList = [];
 const _farHillBillboardQuat = new THREE.Quaternion();
 const _farHillAxisY = new THREE.Vector3(0, 1, 0);
 
@@ -678,17 +677,17 @@ scene.add(bridge);
 // House (Bradley Hall style: two storeys, gable roof, chimney, door, windows)
 const house = createHouse(40, -5.3, -45, 2.2);
 house.rotateY(Math.PI);
-house.rotateZ(Math.PI/32);
+house.rotateZ(Math.PI / 32);
 house.traverse((o) => { if (o.isMesh) { o.receiveShadow = false; o.castShadow = true; } });
 scene.add(house);
 const house2 = createHouse(57.6, -9.6, -40, 2.2);
 house2.rotateY(Math.PI / 1.2);
-house2.rotateZ(Math.PI/32);
+house2.rotateZ(Math.PI / 32);
 house2.traverse((o) => { if (o.isMesh) { o.receiveShadow = false; o.castShadow = true; } });
 scene.add(house2);
 const house3 = createHouse(75.2, -14.4, -33, 2.2);
 house3.rotateY(Math.PI / 1.4);
-house3.rotateZ(Math.PI/32);
+house3.rotateZ(Math.PI / 32);
 house3.traverse((o) => { if (o.isMesh) { o.receiveShadow = false; o.castShadow = true; } });
 scene.add(house3);
 
@@ -867,7 +866,7 @@ const _lilyDummy = new THREE.Object3D();
 const _lilyPetalDummy = new THREE.Object3D();
 const _lilyPetalWorldMatrix = new THREE.Matrix4();
 const _lilyStemMatrix = new THREE.Matrix4();
-// lilyParams moved to PARAMS.lilies
+
 function updateLilies() {
     lilies = [];
     const n = Math.min(PARAMS.lilies.count, LILY_MAX_COUNT);
@@ -1414,7 +1413,7 @@ farHillFolder.add(PARAMS.farHill, "treeCount", 0, 500).step(1).name("Tree count"
 farHillFolder.open();
 
 const lilyFolder = gui.addFolder("Lilies");
-lilyFolder.add(PARAMS.lilies, "count", 0, 40).step(1).name("Count").onChange(updateLilies);
+lilyFolder.add(PARAMS.lilies, "count", 0, 100).step(1).name("Count").onChange(updateLilies);
 lilyFolder.open();
 
 const dragonflyFolder = gui.addFolder("Dragonflies");
@@ -2253,7 +2252,6 @@ function animatePerson(person) {
 
 const _lilyTargetPos = new THREE.Vector3();
 // Flow/queue waypoints for group behaviours (Q3a)
-const BRIDGE_FLOW_TARGET = new THREE.Vector3(-20, 0.8, -40); // bridge deck center
 // Queue target must be on a walkable surface; use connection surface left edge near door (door at ~(-4.3,1.8,-33) is unwalkable)
 const DUNELM_QUEUE_TARGET = new THREE.Vector3(-4.25, 0, -33);
 const DUNELM_DOOR_OPEN_RADIUS = 2;
@@ -2272,26 +2270,18 @@ function updateDecision(person) {
                 person.target = _lilyTargetPos.clone().add(new THREE.Vector3((Math.random() - 0.5) * 4, 0, (Math.random() - 0.5) * 4));
             }
 
-        } /*else if (Math.random() < 0.0008) {
-            person.state = "FLOW";
-            person.target = BRIDGE_FLOW_TARGET.clone();
-        } else if (Math.random() < 0.0008) {
+        } else if (Math.random() < 0.008) {
             person.state = "QUEUING";
             person.target = DUNELM_QUEUE_TARGET.clone();
-        }*/
-    } else if (person.state === "SEEK_LILY") {
-        if (person.target != null && person.pos.distanceTo(person.target) < 10) {
-            person.state = "SNAPPING";
-            person.snapPosition = person.target.clone();
-            person.target = null;
-            person.snapTimer = 0;
-            person.snapFlashDone = false;
-        }
-        /*} else if (person.state === "FLOW") {
-            if (person.target != null && person.pos.distanceTo(person.target) < 8) {
-                person.state = "WANDER";
+        } else if (person.state === "SEEK_LILY" && lilies.length > 0) {
+            if (person.target != null && person.pos.distanceTo(person.target) < 10) {
+                person.state = "SNAPPING";
+                person.snapPosition = person.target.clone();
                 person.target = null;
-            }*/
+                person.snapTimer = 0;
+                person.snapFlashDone = false;
+            }
+        }
     }
     // QUEUING -> INSIDE is handled in animate loop when person is within DUNELM_DOOR_OPEN_RADIUS
     return person;
@@ -2642,18 +2632,13 @@ function animate() {
         }
     }
 
-    // Far-hill billboards: single camera-facing quaternion (cylindrical billboard in XZ), distance cull only (InstancedMesh frustum culling handles visibility)
+    // Far-hill billboards: cylindrical (Y-up) — one quaternion so planes face camera in XZ; no culling
     _farHillBillboardQuat.setFromAxisAngle(_farHillAxisY, Math.atan2(camera.position.x, camera.position.z));
-    _farHillVisibleList.length = 0;
     for (let i = 0; i < farHillTreePositions.length; i++) {
-        const pos = farHillTreePositions[i];
-        if (pos.distanceTo(camPos) <= FAR_HILL_CULL_DISTANCE) _farHillVisibleList.push(pos);
-    }
-    for (let i = 0; i < _farHillVisibleList.length; i++) {
-        _dummyMatrix.compose(_farHillVisibleList[i], _farHillBillboardQuat, _dummyScale);
+        _dummyMatrix.compose(farHillTreePositions[i], _farHillBillboardQuat, _dummyScale);
         farHillBillboardInstancedMesh.setMatrixAt(i, _dummyMatrix);
     }
-    farHillBillboardInstancedMesh.count = _farHillVisibleList.length;
+    farHillBillboardInstancedMesh.count = farHillTreePositions.length;
     farHillBillboardInstancedMesh.instanceMatrix.needsUpdate = true;
 
     updateCamera();
