@@ -12,10 +12,10 @@ import { createHouse } from './objects/house.js';
 import { createStaircase } from './objects/staircase.js';
 import { getSharedPetalGeometry, getSharedStemGeometry, PETAL_LAYOUT } from './objects/lilyStructure.js';
 import { createConnectionSurface, createQuadSurface } from './objects/connectionSurface.js';
+import { createBezierSurface, evalBezierSurface } from './objects/surface.js';
+import { createBSplineSurface, getBSplineSurfaceWorldPointAtNormalized, updateBSplineSurfaceFromPoints } from './objects/bsplineSurface.js';
 import Stats from 'three/examples/jsm/libs/stats.module'
 import { generateTerrain } from './objects/landscape/farHill.js';
-import { createBezierSurface, createDraggableBezierSurface, evalBezierSurface } from './objects/surface.js';
-import { createBSplineSurface, createDraggableBSplineSurface, updateBSplineSurfaceFromPoints, getBSplineSurfaceWorldPointAtNormalized } from './objects/bsplineSurface.js';
 import { getTexture } from './utils/getTexture.js';
 import { Octree, createOctreeDebugLines } from './utils/Octree.js';
 import { createDragonfly, getDragonflyGeometry, getDragonflyGeometryLOD, getDragonflyMaterial } from './objects/dragonfly.js';
@@ -52,7 +52,7 @@ const pixelRatio = Math.min(window.devicePixelRatio, 2);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(pixelRatio);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1;
+renderer.toneMappingExposure = 1.2;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.BasicShadowMap; // Faster than PCFSoftShadowMap for 1000+ entities
 document.body.appendChild(renderer.domElement);
@@ -71,10 +71,10 @@ renderer.domElement.addEventListener('webglcontextrestored', () => {
 
 // Unified PARAMS dictionary for all GUI-controlled values (defined early so it's available for post-processing setup)
 const PARAMS = {
-    // Sky gradient
+    // Sky gradient (Lumiere: slightly lit night sky)
     sky: {
-        topColor: 0x151530,
-        bottomColor: 0x050510
+        topColor: 0x1e1e3a,
+        bottomColor: 0x0c0c1a
     },
     // People
     people: {
@@ -105,7 +105,7 @@ const PARAMS = {
         antialiasing: 'FXAA',
         ssaoEnabled: false,
         output: 'Composite',
-        exposure: 1
+        exposure: 1.2
     },
     // Performance
     performance: {
@@ -124,18 +124,6 @@ const PARAMS = {
         showHull: false,
         showControlPoints: false,
         wireframe: false
-    },
-    // Draggable B-spline (functions will be defined later)
-    draggableBSpline: {
-        selectedBSpline: 'None',
-        addBSplineSurface: null, // will be set later
-        saveCoordinates: null // will be set later
-    },
-    // Draggable Bezier (functions will be defined later)
-    draggableBezier: {
-        selectedCurve: 'None',
-        addBezierSurface: null, // will be set later
-        saveCoordinates: null // will be set later
     },
     // Dragonflies
     dragonflies: {
@@ -645,16 +633,6 @@ for (let i = 0; i < WAVE_PLANE_LIGHTS_GRID; i++) {
         scene.add(sphereMesh);
     }
 }
-
-// Draggable Bezier surfaces state
-const draggableBezierSurfaces = [];
-let selectedDraggableIndex = -1; // -1 means no selection
-let dragControls = null;
-
-// Draggable B-spline surfaces state
-const draggableBSplineSurfaces = [];
-let selectedBSplineIndex = -1;
-let dragControlsBSpline = null;
 
 // Dunelm house windows: env-map reflection (no planar mirror renders)
 const dunelmEnvMap = createDefaultEnvMap();
@@ -1200,13 +1178,13 @@ function updateDragonflyOctreeDebugLine() {
     if (dragonflyOctreeDebugLine) scene.add(dragonflyOctreeDebugLine);
 }
 
-// Night lighting: dim ambient, blue-tinted moon, hemisphere for sky/ground
-const ambientLight = new THREE.AmbientLight(0x202040, 1.0);
+// Night lighting — Lumiere-style: readable night with moon + ambient + hemisphere + festival accents
+const ambientLight = new THREE.AmbientLight(0x2a2a50, 1.25);
 scene.add(ambientLight);
 ambientLight.matrixAutoUpdate = false;
 
-const directionalLight = new THREE.DirectionalLight(0xaaccff, 0.6);
-directionalLight.position.set(2, 5, 3);
+const directionalLight = new THREE.DirectionalLight(0xb8d4ff, 0.85);
+directionalLight.position.set(2, 150, 3);
 directionalLight.castShadow = true;
 // Shadow camera must cover scene bounds (~ -75..90 x, -165..15 z) for shadows to appear
 directionalLight.shadow.mapSize.set(512, 512); // Lower resolution for FPS
@@ -1221,9 +1199,19 @@ scene.add(directionalLight);
 directionalLight.matrixAutoUpdate = false;
 
 // Hemisphere light: sky (top) and ground (bottom) fill for night; replaces expensive sky dome
-const hemisphereLight = new THREE.HemisphereLight(0x1a1a2e, 0x080810, 0.7);
+const hemisphereLight = new THREE.HemisphereLight(0x252548, 0x141422, 0.85);
 scene.add(hemisphereLight);
 hemisphereLight.matrixAutoUpdate = false;
+
+// Festival-style accent lights (warm + cool pools like Lumiere installations)
+const festivalLightWarm = new THREE.PointLight(0xffaa66, 0.5, 55);
+festivalLightWarm.position.set(0, 10, -35);
+scene.add(festivalLightWarm);
+festivalLightWarm.matrixAutoUpdate = false;
+const festivalLightCool = new THREE.PointLight(0x88ccff, 0.4, 50);
+festivalLightCool.position.set(30, 12, -75);
+scene.add(festivalLightCool);
+festivalLightCool.matrixAutoUpdate = false;
 
 // Position the camera
 camera.position.set(5, 5, 5);
@@ -1238,123 +1226,6 @@ document.body.appendChild(stats.dom);
 const axesHelper = new THREE.AxesHelper(5);
 scene.add(axesHelper);
 axesHelper.matrixAutoUpdate = false;
-
-// PARAMS is now defined earlier (before post-processing setup)
-// Set up draggable function references now that scene and other dependencies are available
-PARAMS.draggableBSpline.addBSplineSurface = function () {
-    const initialPoints = [];
-    for (let i = 0; i < 4; i++) {
-        for (let j = 0; j < 4; j++) {
-            const x = (i - 1.5) * 2;
-            const z = (j - 1.5) * 2;
-            const y = (i === 1 || i === 2) && (j === 1 || j === 2) ? 2 : 0;
-            initialPoints.push(new THREE.Vector3(x, y, z));
-        }
-    }
-    const draggableSurface = createDraggableBSplineSurface(initialPoints, {
-        dimU: 4,
-        dimV: 4,
-        segments: 20,
-        showHull: true,
-        showControlPoints: true,
-        wireframe: false
-    });
-    const offset = draggableBSplineSurfaces.length * 10;
-    draggableSurface.position.set(offset, 0, -20);
-    scene.add(draggableSurface);
-    draggableBSplineSurfaces.push(draggableSurface);
-    selectedBSplineIndex = draggableBSplineSurfaces.length - 1;
-    selectedDraggableIndex = -1;
-    updateDragControls();
-    updateBSplineDragControls();
-    updateBSplineSelectionDropdown();
-    updateCoordsDisplay();
-};
-
-PARAMS.draggableBSpline.saveCoordinates = function () {
-    if (selectedBSplineIndex < 0 || selectedBSplineIndex >= draggableBSplineSurfaces.length) {
-        console.log('No draggable B-spline surface selected');
-        return;
-    }
-    const selected = draggableBSplineSurfaces[selectedBSplineIndex];
-    const controlPointMeshes = selected.userData.bspline.controlPoints;
-    const dimU = selected.userData.bspline.dimU;
-    const dimV = selected.userData.bspline.dimV;
-    const positions = controlPointMeshes.map((mesh, idx) => {
-        const i = Math.floor(idx / dimV);
-        const j = idx % dimV;
-        return {
-            index: idx,
-            grid: [i, j],
-            position: {
-                x: parseFloat(mesh.position.x.toFixed(2)),
-                y: parseFloat(mesh.position.y.toFixed(2)),
-                z: parseFloat(mesh.position.z.toFixed(2))
-            }
-        };
-    });
-    console.log('=== Draggable B-spline Surface ' + (selectedBSplineIndex + 1) + ' Control Points ===');
-    console.log(JSON.stringify(positions, null, 2));
-    positions.forEach(p => {
-        console.log(`P${p.index} (${p.grid[0]},${p.grid[1]}): (${p.position.x}, ${p.position.y}, ${p.position.z})`);
-    });
-};
-
-PARAMS.draggableBezier.addBezierSurface = function () {
-    const initialPoints = [];
-    for (let i = 0; i < 4; i++) {
-        for (let j = 0; j < 4; j++) {
-            const x = (i - 1.5) * 2;
-            const z = (j - 1.5) * 2;
-            const y = (i === 1 || i === 2) && (j === 1 || j === 2) ? 2 : 0;
-            initialPoints.push(new THREE.Vector3(x, y, z));
-        }
-    }
-    const draggableSurface = createDraggableBezierSurface(initialPoints, {
-        segments: 20,
-        showHull: true,
-        showControlPoints: true,
-        wireframe: false
-    });
-    const offset = draggableBezierSurfaces.length * 10;
-    draggableSurface.position.set(offset, 0, -4);
-    scene.add(draggableSurface);
-    draggableBezierSurfaces.push(draggableSurface);
-    selectedDraggableIndex = draggableBezierSurfaces.length - 1;
-    selectedBSplineIndex = -1;
-    updateBSplineDragControls();
-    updateDragControls();
-    updateSelectionDropdown();
-    updateCoordsDisplay();
-};
-
-PARAMS.draggableBezier.saveCoordinates = function () {
-    if (selectedDraggableIndex < 0 || selectedDraggableIndex >= draggableBezierSurfaces.length) {
-        console.log('No draggable Bezier surface selected');
-        return;
-    }
-    const selected = draggableBezierSurfaces[selectedDraggableIndex];
-    const controlPointMeshes = selected.userData.bezier.controlPoints;
-    const positions = controlPointMeshes.map((mesh, idx) => {
-        const i = Math.floor(idx / 4);
-        const j = idx % 4;
-        return {
-            index: idx,
-            grid: [i, j],
-            position: {
-                x: parseFloat(mesh.position.x.toFixed(2)),
-                y: parseFloat(mesh.position.y.toFixed(2)),
-                z: parseFloat(mesh.position.z.toFixed(2))
-            }
-        };
-    });
-    console.log('=== Draggable Bezier Surface ' + (selectedDraggableIndex + 1) + ' Control Points ===');
-    console.log(JSON.stringify(positions, null, 2));
-    console.log('\nHuman-readable format:');
-    positions.forEach(p => {
-        console.log(`P${p.index} (${p.grid[0]},${p.grid[1]}): (${p.position.x}, ${p.position.y}, ${p.position.z})`);
-    });
-};
 
 // Creating a GUI with options
 const gui = new GUI({ name: "Lumiere GUI" });
@@ -1523,88 +1394,6 @@ bezierFolder.add(PARAMS.bezier, "wireframe").name("Wireframe overlay").onChange(
     if (nearPavementSurface.userData.bezier?.wireframe) nearPavementSurface.userData.bezier.wireframe.visible = v;
 });
 
-const bsplineFolder = gui.addFolder("B-spline surface");
-bsplineFolder.add(PARAMS.bspline, "showHull").name("Show control hull").onChange((v) => {
-    PARAMS.bspline.showHull = v;
-    if (bsplineSurface?.userData.bspline?.hull) bsplineSurface.userData.bspline.hull.visible = v;
-    draggableBSplineSurfaces.forEach(s => {
-        if (s.userData.bspline?.hull) s.userData.bspline.hull.visible = v;
-    });
-});
-bsplineFolder.add(PARAMS.bspline, "showControlPoints").name("Show control points").onChange((v) => {
-    PARAMS.bspline.showControlPoints = v;
-    if (bsplineSurface?.userData.bspline?.controlPoints) {
-        bsplineSurface.userData.bspline.controlPoints.forEach(sp => { sp.visible = v; });
-    }
-    draggableBSplineSurfaces.forEach(s => {
-        (s.userData.bspline?.controlPoints || []).forEach(sp => { sp.visible = v; });
-    });
-});
-bsplineFolder.add(PARAMS.bspline, "wireframe").name("Wireframe overlay").onChange((v) => {
-    PARAMS.bspline.wireframe = v;
-    if (bsplineSurface?.userData.bspline?.wireframe) bsplineSurface.userData.bspline.wireframe.visible = v;
-    draggableBSplineSurfaces.forEach(s => {
-        if (s.userData.bspline?.wireframe) s.userData.bspline.wireframe.visible = v;
-    });
-});
-
-// draggableBSplineParams is now PARAMS.draggableBSpline
-const draggableBSplineParams = PARAMS.draggableBSpline;
-
-const draggableBSplineFolder = gui.addFolder("Draggable B-spline");
-draggableBSplineFolder.add(draggableBSplineParams, 'addBSplineSurface').name('Add B-spline surface');
-
-let bsplineSelectionController = null;
-function updateBSplineSelectionDropdown() {
-    if (bsplineSelectionController) {
-        draggableBSplineFolder.remove(bsplineSelectionController);
-    }
-    if (draggableBSplineSurfaces.length > 0) {
-        const options = {};
-        for (let i = 0; i < draggableBSplineSurfaces.length; i++) {
-            options['B-spline ' + (i + 1)] = i;
-        }
-        draggableBSplineParams.selectedBSpline = selectedBSplineIndex >= 0 ? selectedBSplineIndex : 0;
-        bsplineSelectionController = draggableBSplineFolder.add(draggableBSplineParams, 'selectedBSpline', options).name('Selected surface').onChange((value) => {
-            selectedBSplineIndex = parseInt(value);
-            selectedDraggableIndex = -1;
-            updateDragControls();
-            updateBSplineDragControls();
-            updateCoordsDisplay();
-        });
-    }
-}
-draggableBSplineFolder.add(draggableBSplineParams, 'saveCoordinates').name('Save control coordinates');
-
-// draggableParams is now PARAMS.draggableBezier
-const draggableParams = PARAMS.draggableBezier;
-
-const draggableFolder = gui.addFolder("Draggable Bezier");
-draggableFolder.add(draggableParams, 'addBezierSurface').name('Add Bezier surface');
-
-let selectionController = null;
-function updateSelectionDropdown() {
-    if (selectionController) {
-        draggableFolder.remove(selectionController);
-    }
-    if (draggableBezierSurfaces.length > 0) {
-        const options = {};
-        for (let i = 0; i < draggableBezierSurfaces.length; i++) {
-            options['Bezier ' + (i + 1)] = i;
-        }
-        PARAMS.draggableBezier.selectedCurve = selectedDraggableIndex >= 0 ? selectedDraggableIndex : 0;
-        selectionController = draggableFolder.add(draggableParams, 'selectedCurve', options).name('Selected curve').onChange((value) => {
-            selectedDraggableIndex = parseInt(value);
-            selectedBSplineIndex = -1;
-            updateBSplineDragControls();
-            updateDragControls();
-            updateCoordsDisplay();
-        });
-    }
-}
-
-draggableFolder.add(draggableParams, 'saveCoordinates').name('Save control coordinates');
-
 // Debug: Octree visualisation
 const debugParams = { octree: false, dragonflyOctree: false };
 const debugFolder = gui.addFolder("Debug");
@@ -1660,109 +1449,6 @@ coordsPanel.innerHTML = `
     <pre id="coordsList" style="margin: 0; color: #bdc3c7; font-family: 'Consolas', 'Monaco', monospace; white-space: pre-wrap; word-break: break-all;">—</pre>
 `;
 document.body.appendChild(coordsPanel);
-
-function updateDragControls() {
-    if (dragControls) {
-        dragControls.dispose();
-        dragControls = null;
-    }
-
-    // Create new DragControls for selected surface
-    if (selectedDraggableIndex >= 0 && selectedDraggableIndex < draggableBezierSurfaces.length) {
-        const selectedGroup = draggableBezierSurfaces[selectedDraggableIndex];
-        const controlPointMeshes = selectedGroup.userData.bezier.controlPoints;
-
-        dragControls = new DragControls(controlPointMeshes, camera, renderer.domElement);
-        dragControls.addEventListener('dragstart', () => {
-            orbitControls.enabled = false;
-        });
-        dragControls.addEventListener('dragend', () => {
-            orbitControls.enabled = true;
-        });
-
-        // Hover effects
-        dragControls.addEventListener('hoveron', (e) => {
-            e.object.material.color.set(0xffaa00);
-        });
-        dragControls.addEventListener('hoveroff', (e) => {
-            e.object.material.color.set(0xcccccc);
-        });
-    }
-}
-
-function updateCoordsDisplay() {
-    const coordsList = document.getElementById('coordsList');
-    const coordsType = document.getElementById('coordsType');
-    if (!coordsList) return;
-
-    // B-spline selected: show B-spline control point coordinates
-    if (selectedBSplineIndex >= 0 && selectedBSplineIndex < draggableBSplineSurfaces.length) {
-        if (coordsType) coordsType.textContent = 'B-spline ' + (selectedBSplineIndex + 1);
-        const selected = draggableBSplineSurfaces[selectedBSplineIndex];
-        const controlPointMeshes = selected.userData.bspline.controlPoints;
-        const dimV = selected.userData.bspline.dimV;
-        const lines = [];
-        for (let idx = 0; idx < controlPointMeshes.length; idx++) {
-            const i = Math.floor(idx / dimV);
-            const j = idx % dimV;
-            const pos = controlPointMeshes[idx].position;
-            lines.push(`P${idx} (${i},${j}): (${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)})`);
-        }
-        coordsList.textContent = lines.join('\n');
-        return;
-    }
-
-    // Bezier selected: show Bezier control point coordinates
-    if (selectedDraggableIndex >= 0 && selectedDraggableIndex < draggableBezierSurfaces.length) {
-        if (coordsType) coordsType.textContent = 'Bezier ' + (selectedDraggableIndex + 1);
-        const selected = draggableBezierSurfaces[selectedDraggableIndex];
-        const controlPointMeshes = selected.userData.bezier.controlPoints;
-        const lines = [];
-        for (let idx = 0; idx < controlPointMeshes.length; idx++) {
-            const i = Math.floor(idx / 4);
-            const j = idx % 4;
-            const pos = controlPointMeshes[idx].position;
-            lines.push(`P${idx} (${i},${j}): (${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)})`);
-        }
-        coordsList.textContent = lines.join('\n');
-        return;
-    }
-
-    // No draggable selected: show fixed B-spline control point coordinates if available
-    if (bsplineSurface?.userData?.bspline?.controlPoints?.length) {
-        if (coordsType) coordsType.textContent = 'B-spline (fixed)';
-        const controlPointMeshes = bsplineSurface.userData.bspline.controlPoints;
-        const dimV = bsplineSurface.userData.bspline.dimV;
-        const lines = [];
-        for (let idx = 0; idx < controlPointMeshes.length; idx++) {
-            const i = Math.floor(idx / dimV);
-            const j = idx % dimV;
-            const pos = controlPointMeshes[idx].position;
-            lines.push(`P${idx} (${i},${j}): (${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)})`);
-        }
-        coordsList.textContent = lines.join('\n');
-        return;
-    }
-
-    if (coordsType) coordsType.textContent = '—';
-    coordsList.textContent = '—';
-}
-
-function updateBSplineDragControls() {
-    if (dragControlsBSpline) {
-        dragControlsBSpline.dispose();
-        dragControlsBSpline = null;
-    }
-    if (selectedBSplineIndex >= 0 && selectedBSplineIndex < draggableBSplineSurfaces.length) {
-        const selectedGroup = draggableBSplineSurfaces[selectedBSplineIndex];
-        const controlPointMeshes = selectedGroup.userData.bspline.controlPoints;
-        dragControlsBSpline = new DragControls(controlPointMeshes, camera, renderer.domElement);
-        dragControlsBSpline.addEventListener('dragstart', () => { orbitControls.enabled = false; });
-        dragControlsBSpline.addEventListener('dragend', () => { orbitControls.enabled = true; });
-        dragControlsBSpline.addEventListener('hoveron', (e) => { e.object.material.color.set(0xffaa00); });
-        dragControlsBSpline.addEventListener('hoveroff', (e) => { e.object.material.color.set(0xcccccc); });
-    }
-}
 
 function updateCrowdCount() {
     PARAMS.people.count = people.length;
@@ -2585,29 +2271,6 @@ function animate() {
         _t0 = performance.now();
     }
 
-    /*
-    // Update all draggable Bezier surfaces
-    for (let i = 0; i < draggableBezierSurfaces.length; i++) {
-        const group = draggableBezierSurfaces[i];
-        if (group.userData.bezier?.update) {
-            group.userData.bezier.update();
-        }
-    }
-    // Update all draggable B-spline surfaces
-    for (let i = 0; i < draggableBSplineSurfaces.length; i++) {
-        const group = draggableBSplineSurfaces[i];
-        if (group.userData.bspline?.update) {
-            group.userData.bspline.update();
-        }
-    }
-    if (selectedDraggableIndex >= 0 && selectedDraggableIndex < draggableBezierSurfaces.length) {
-        updateCoordsDisplay();
-    }
-    if (selectedBSplineIndex >= 0 && selectedBSplineIndex < draggableBSplineSurfaces.length) {
-        updateCoordsDisplay();
-    }
-    */
-
     // Wave plane: animate control points y = 20 + 8*sin(t + phase) then update surface
     const waveT = performance.now() * 0.001;
     const k1 = 0.8, k2 = 0.8;
@@ -2632,10 +2295,12 @@ function animate() {
         }
     }
 
-    // Far-hill billboards: cylindrical (Y-up) — one quaternion so planes face camera in XZ; no culling
-    _farHillBillboardQuat.setFromAxisAngle(_farHillAxisY, Math.atan2(camera.position.x, camera.position.z));
+    // Far-hill billboards: cylindrical (Y-up) — each plane faces camera (like lookAt) from its own position
     for (let i = 0; i < farHillTreePositions.length; i++) {
-        _dummyMatrix.compose(farHillTreePositions[i], _farHillBillboardQuat, _dummyScale);
+        const pos = farHillTreePositions[i];
+        const angleY = Math.atan2(camera.position.x - pos.x, camera.position.z - pos.z);
+        _farHillBillboardQuat.setFromAxisAngle(_farHillAxisY, angleY);
+        _dummyMatrix.compose(pos, _farHillBillboardQuat, _dummyScale);
         farHillBillboardInstancedMesh.setMatrixAt(i, _dummyMatrix);
     }
     farHillBillboardInstancedMesh.count = farHillTreePositions.length;
