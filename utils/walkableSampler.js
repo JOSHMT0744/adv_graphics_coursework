@@ -579,6 +579,8 @@ export function createCombinedSampler(regions, options = {}) {
                 if (cache && cache.inside && typeof cache.cellIx === 'number' && typeof cache.cellIz === 'number' && cache.cellIx === cellIx && cache.cellIz === cellIz) {
                     const distSq = (typeof cache._lastX === 'number' && typeof cache._lastZ === 'number')
                         ? (x - cache._lastX) ** 2 + (z - cache._lastZ) ** 2 : 0;
+
+                    // If in same cell, we can assume y valu hasn't changed, and so can replace cached x,z with new values
                     if (distSq <= 0.1) {
                         if (cache) { cache._lastX = x; cache._lastZ = z; }
                         return {
@@ -673,6 +675,71 @@ export function createCombinedSampler(regions, options = {}) {
                 if (valid) hit = valid;
             }
             return { inside: true, y: hit.point.y };
+        },
+        /**
+         * World-bounds boundary info for steering: distance to nearest edge, outward normal (into walkable), nearest point on boundary.
+         * @param {number} x - world X
+         * @param {number} z - world Z
+         * @param {object} [cache] - unused; for API consistency with getSurfaceInfo
+         * @returns {{ distanceToEdge: number, outwardNormalX: number, outwardNormalZ: number, nearestBoundaryX: number, nearestBoundaryZ: number, outside: boolean }}
+         */
+        getBoundaryInfo(x, z, cache) {
+            const minX = gridMinX, maxX = gridMaxX, minZ = gridMinZ, maxZ = gridMaxZ;
+            const dMinX = x - minX, dMaxX = maxX - x, dMinZ = z - minZ, dMaxZ = maxZ - z;
+            const distanceToEdge = Math.min(dMinX, dMaxX, dMinZ, dMaxZ);
+            const outside = distanceToEdge < 0;
+            const nearestBoundaryX = Math.max(minX, Math.min(maxX, x));
+            const nearestBoundaryZ = Math.max(minZ, Math.min(maxZ, z));
+            let outwardNormalX = 0, outwardNormalZ = 0;
+            if (dMinX <= dMaxX && dMinX <= dMinZ && dMinX <= dMaxZ) {
+                outwardNormalX = 1;
+                outwardNormalZ = 0;
+            } else if (dMaxX <= dMinX && dMaxX <= dMinZ && dMaxX <= dMaxZ) {
+                outwardNormalX = -1;
+                outwardNormalZ = 0;
+            } else if (dMinZ <= dMinX && dMinZ <= dMaxX && dMinZ <= dMaxZ) {
+                outwardNormalX = 0;
+                outwardNormalZ = 1;
+            } else {
+                outwardNormalX = 0;
+                outwardNormalZ = -1;
+            }
+            return {
+                distanceToEdge,
+                outwardNormalX,
+                outwardNormalZ,
+                nearestBoundaryX,
+                nearestBoundaryZ,
+                outside
+            };
+        },
+        /**
+         * Get grid cell bounds for debug visualization.
+         * Returns array of Box3 objects representing each grid cell that has valid height data.
+         * @returns {THREE.Box3[]}
+         */
+        getGridCells() {
+            const cells = [];
+            if (!heightGrid || numX === 0 || numZ === 0) return cells;
+            for (let i = 0; i < numX; i++) {
+                for (let j = 0; j < numZ; j++) {
+                    const idx = i * numZ + j;
+                    const y = heightGrid[idx];
+                    // Only include cells with valid height data (not NaN)
+                    if (y === y && y !== HEIGHT_GRID_SENTINEL) {
+                        const cellMinX = gridMinX + i * cellSize;
+                        const cellMaxX = gridMinX + (i + 1) * cellSize;
+                        const cellMinZ = gridMinZ + j * cellSize;
+                        const cellMaxZ = gridMinZ + (j + 1) * cellSize;
+                        const cell = new THREE.Box3(
+                            new THREE.Vector3(cellMinX, y - 0.1, cellMinZ),
+                            new THREE.Vector3(cellMaxX, y + 0.1, cellMaxZ)
+                        );
+                        cells.push(cell);
+                    }
+                }
+            }
+            return cells;
         },
         regions
     };

@@ -330,33 +330,35 @@ export class Figure {
         const matSkin = new THREE.MeshStandardMaterial({ color: skin });
         const matBody = Figure.getInstanceMaterial();
 
+        // Match buildPersonMesh: torso center 1.25 (legs 0–0.75, torso 0.5–2.0)
         const bodyGeo = new THREE.BoxGeometry(1, 1.5, 1);
-        bodyGeo.translate(0, 0.75, 0);
+        bodyGeo.translate(0, 1.25, 0);
 
         const headGeo = new THREE.BoxGeometry(1.4, 1.4, 1.4);
-        headGeo.translate(0, 1.65, 0);
+        headGeo.translate(0, 2.45, 0); // head center = torsoCenter + torsoHeight/2 + 0.7 = 1.25 + 0.5 + 0.7
 
-        // Legs: limb technique — box, translate so centre at origin, then position (reference style)
+        // Legs: same as buildPersonMesh — hip at y=legHeight (0.75), feet at y=0; geometry has hip at local y=0 after translate
         const legHeight = 0.75;
         const legGeo = new THREE.BoxGeometry(0.28, legHeight, 0.28);
         legGeo.translate(0, -legHeight / 2, 0);
         const legLeft = legGeo.clone();
-        legLeft.applyMatrix4(new THREE.Matrix4().makeTranslation(-0.36, legHeight / 2, 0));
+        legLeft.applyMatrix4(new THREE.Matrix4().makeTranslation(-0.36, legHeight, 0));
         const legRight = legGeo.clone();
-        legRight.applyMatrix4(new THREE.Matrix4().makeTranslation(0.36, legHeight / 2, 0));
+        legRight.applyMatrix4(new THREE.Matrix4().makeTranslation(0.36, legHeight, 0));
         legGeo.dispose();
 
-        // Arms: same limb technique — box, translate(0, -halfHeight, 0), then position + rotate (shoulder 0.625, 1.1)
+        // Arms: shoulder at 1.55 to match buildPersonMesh (torsoCenter + torsoHeight/2 - 0.2)
         const armHeight = 1;
+        const shoulderY = 1.55;
         const armGeo = new THREE.BoxGeometry(0.25, armHeight, 0.25);
         armGeo.translate(0, -armHeight / 2, 0);
         const armLeft = armGeo.clone();
         armLeft.applyMatrix4(
-            new THREE.Matrix4().makeTranslation(0.625, 1.1, 0).multiply(new THREE.Matrix4().makeRotationZ(Math.PI / 12))
+            new THREE.Matrix4().makeTranslation(0.625, shoulderY, 0).multiply(new THREE.Matrix4().makeRotationZ(Math.PI / 12))
         );
         const armRight = armGeo.clone();
         armRight.applyMatrix4(
-            new THREE.Matrix4().makeTranslation(-0.625, 1.1, 0).multiply(new THREE.Matrix4().makeRotationZ(-Math.PI / 12))
+            new THREE.Matrix4().makeTranslation(-0.625, shoulderY, 0).multiply(new THREE.Matrix4().makeRotationZ(-Math.PI / 12))
         );
         armGeo.dispose();
 
@@ -416,28 +418,30 @@ export class Figure {
      * Parts: 0=body, 1=head, 2=legL, 3=legR, 4=armL, 5=armR.
      */
     static getInstanceGeometryHighOnly() {
+        // Match buildPersonMesh: torso center 1.25, head center 2.45, shoulder 1.55; feet at y=0; leg hip at y=legHeight (0.75)
         const bodyGeo = new THREE.BoxGeometry(1, 1.5, 1);
-        bodyGeo.translate(0, 0.75, 0);
+        bodyGeo.translate(0, 1.25, 0);
         const headGeo = new THREE.BoxGeometry(1.4, 1.4, 1.4);
-        headGeo.translate(0, 1.65, 0);
+        headGeo.translate(0, 2.45, 0);
         const legHeight = 0.75;
         const legGeo = new THREE.BoxGeometry(0.28, legHeight, 0.28);
         legGeo.translate(0, -legHeight / 2, 0);
         const legLeft = legGeo.clone();
-        legLeft.applyMatrix4(new THREE.Matrix4().makeTranslation(-0.36, legHeight / 2, 0));
+        legLeft.applyMatrix4(new THREE.Matrix4().makeTranslation(-0.36, legHeight, 0));
         const legRight = legGeo.clone();
-        legRight.applyMatrix4(new THREE.Matrix4().makeTranslation(0.36, legHeight / 2, 0));
+        legRight.applyMatrix4(new THREE.Matrix4().makeTranslation(0.36, legHeight, 0));
         legGeo.dispose();
         const armHeight = 1;
+        const shoulderY = 1.55;
         const armGeo = new THREE.BoxGeometry(0.25, armHeight, 0.25);
         armGeo.translate(0, -armHeight / 2, 0);
         const armLeft = armGeo.clone();
         armLeft.applyMatrix4(
-            new THREE.Matrix4().makeTranslation(0.625, 1.1, 0).multiply(new THREE.Matrix4().makeRotationZ(Math.PI / 12))
+            new THREE.Matrix4().makeTranslation(0.625, shoulderY, 0).multiply(new THREE.Matrix4().makeRotationZ(Math.PI / 12))
         );
         const armRight = armGeo.clone();
         armRight.applyMatrix4(
-            new THREE.Matrix4().makeTranslation(-0.625, 1.1, 0).multiply(new THREE.Matrix4().makeRotationZ(-Math.PI / 12))
+            new THREE.Matrix4().makeTranslation(-0.625, shoulderY, 0).multiply(new THREE.Matrix4().makeRotationZ(-Math.PI / 12))
         );
         armGeo.dispose();
         const merged = mergeGeometries([bodyGeo, headGeo, legLeft, legRight, armLeft, armRight]);

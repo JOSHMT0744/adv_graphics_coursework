@@ -4,7 +4,7 @@ import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js
 // Default physics limits (per-entity randomization applied in createDragonfly)
 const DEFAULT_MAX_SPEED = 0.7;
 const DEFAULT_MAX_FORCE = 0.04;
-const FORCE_RADIUS = 0.5;
+const FORCE_RADIUS = 0.3;
 
 let _cachedGeometry = null;
 let _cachedGeometryLOD = null;
