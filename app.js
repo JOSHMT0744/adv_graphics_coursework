@@ -211,6 +211,8 @@ composer.setPixelRatio(pixelRatio);
 const orbitControls = new OrbitControls(camera, renderer.domElement);
 orbitControls.enableDamping = true;
 orbitControls.dampingFactor = 0.05;
+orbitControls.minPolarAngle = 0;
+orbitControls.maxPolarAngle = Math.PI / 2;
 
 const controls = {
     moveSpeed: 1,
@@ -663,7 +665,7 @@ house2.rotateY(Math.PI / 1.2);
 house2.rotateZ(Math.PI / 32);
 house2.traverse((o) => { if (o.isMesh) { o.receiveShadow = false; o.castShadow = true; } });
 scene.add(house2);
-const house3 = createHouse(75.2, -14.4, -33, 2.2);
+const house3 = createHouse(75.2, -15.4, -33, 2.2);
 house3.rotateY(Math.PI / 1.4);
 house3.rotateZ(Math.PI / 32);
 house3.traverse((o) => { if (o.isMesh) { o.receiveShadow = false; o.castShadow = true; } });
@@ -941,6 +943,8 @@ const WALKABLE_WORLD_BOUNDS = new THREE.Box3(
 );
 const octree = new Octree(WALKABLE_WORLD_BOUNDS, { maxDepth: 5, minSize: 2 });
 const MAX_PLACEMENT_RETRIES = 20;
+const BOUNDARY_SOFT_MARGIN = 3; // WHen within this distance of walkable boundary, gradual force encourages turning away
+const BOUNDARY_PUSH_INWARD = 1; // steer toward a point this far past nearest, to escape sliding along the edge
 const PERSON_BOUNDARY_MARGIN = 2; // steer/placement: keep people this far from world bounds (avoids stuck outside collision avoidance)
 
 const walkableRegions = [
@@ -1248,7 +1252,7 @@ peopleFolder.open();
 
 const flockingFolder = gui.addFolder("Flocking Behavior");
 const sepCheckbox = flockingFolder.add(PARAMS.flocking.sep, "on").name("Separation");
-const sepSlider = flockingFolder.add(PARAMS.flocking.sep, "val", 0, 3, 0.1).name("Separation Weight");
+const sepSlider = flockingFolder.add(PARAMS.flocking.sep, "val", 0, 1, 0.05).name("Separation Weight");
 sepCheckbox.onChange((v) => {
     PARAMS.flocking.sep.on = v;
     sepSlider.__li.style.opacity = v ? 1 : 0.5;
@@ -1268,7 +1272,7 @@ aliSlider.__li.style.opacity = PARAMS.flocking.ali.on ? 1 : 0.5;
 aliSlider.domElement.disabled = !PARAMS.flocking.ali.on;
 
 const cohCheckbox = flockingFolder.add(PARAMS.flocking.coh, "on").name("Cohesion");
-const cohSlider = flockingFolder.add(PARAMS.flocking.coh, "val", 0, 3, 0.1).name("Cohesion Weight");
+const cohSlider = flockingFolder.add(PARAMS.flocking.coh, "val", 0, 1, 0.05).name("Cohesion Weight");
 cohCheckbox.onChange((v) => {
     PARAMS.flocking.coh.on = v;
     cohSlider.__li.style.opacity = v ? 1 : 0.5;
@@ -1461,17 +1465,16 @@ function modifyCrowd(n) {
             for (let retry = 0; retry < MAX_PLACEMENT_RETRIES && !placed; retry++) {
                 const sampleResult = walkableSampler.sampleRandom();
                 const pos = sampleResult instanceof THREE.Vector3 ? sampleResult : sampleResult.pos;
-                const wb = WALKABLE_WORLD_BOUNDS;
-                const m = PERSON_BOUNDARY_MARGIN;
-                const insideBounds = pos.x >= wb.min.x + m && pos.x <= wb.max.x - m &&
-                    pos.z >= wb.min.z + m && pos.z <= wb.max.z - m;
-                if (!insideBounds) continue;
-                let insideObstacle = false;
+                const insideWalkable = walkableSampler.getSurfaceInfo(pos.x, pos.z).inside;
+                if (!insideWalkable) continue;
+
+                /*
                 for (const obj of environmentObjects) {
                     const box = obj.userData?.boundingBox;
                     if (box && box.containsPoint(pos)) { insideObstacle = true; break; }
                 }
                 if (insideObstacle) continue;
+                */
                 const bounds = new THREE.Box3(
                     new THREE.Vector3(pos.x - PERSON_RADIUS, pos.y, pos.z - PERSON_RADIUS),
                     new THREE.Vector3(pos.x + PERSON_RADIUS, pos.y + CHARACTER_HEIGHT, pos.z + PERSON_RADIUS)
@@ -1585,6 +1588,7 @@ function applyPhysics(person) {
         }
 
         // avoid dunelm building (static objects)
+        /*
         const distDunelm = person.pos.distanceTo(dunelm.position);
         if (distDunelm < dunelm.userData.radius) {
             _physicsAvoid.subVectors(person.pos, dunelm.position).normalize().multiplyScalar((dunelm.userData.radius - distDunelm) * 0.5);
@@ -1601,9 +1605,10 @@ function applyPhysics(person) {
                     _physicsForce.add(_physicsAvoid);
                 }
             }
-        }
+        }*/
 
         // Avoid environment obstacles (precomputed Box3 per object); push out when inside
+        /*
         const PERSON_ENV_AVOID_MARGIN = 0.5;
         const PERSON_ENV_AVOID_STRENGTH = 0.5;
         const PERSON_ENV_INSIDE_STRENGTH = 0.2;
@@ -1625,18 +1630,55 @@ function applyPhysics(person) {
                     _physicsForce.add(_physicsAvoid);
                 }
             }
-        }
+        }*/
 
-        // Boundary containment: steer toward walkable center when near world bounds or at surface edge (like dragonfly)
-        const bounds = WALKABLE_WORLD_BOUNDS;
-        const margin = PERSON_BOUNDARY_MARGIN;
-        const nearBoundary = person.pos.x < bounds.min.x + margin || person.pos.x > bounds.max.x - margin ||
-            person.pos.z < bounds.min.z + margin || person.pos.z > bounds.max.z - margin;
-        if (nearBoundary) {
-            const centerX = (bounds.min.x + bounds.max.x) / 2;
-            const centerZ = (bounds.min.z + bounds.max.z) / 2;
-            _physicsBoundarySteer.set(centerX, 0, centerZ).sub(person.pos).normalize().multiplyScalar(PERSON_BOUNDARY_STRENGTH);
-            _physicsForce.add(_physicsBoundarySteer);
+        // Boundary containment: steer toward walkable when off walkable regions
+        const surfaceInfo = walkableSampler.getSurfaceInfo(person.pos.x, person.pos.z);
+        const nearest = walkableSampler.getNearestWalkable(person.pos.x, person.pos.z);
+        if (!surfaceInfo.inside) {
+            const dx = nearest.x - person.pos.x, dz = nearest.z - person.pos.z;
+            const lenSq = dx * dx + dz * dz;
+            if (lenSq > 1e-10) {
+                const inwardLen = Math.sqrt(lenSq);
+                const tx = nearest.x + (dx / inwardLen) * BOUNDARY_PUSH_INWARD;
+                const tz = nearest.z + (dz / inwardLen) * BOUNDARY_PUSH_INWARD;
+                _physicsBoundarySteer.set(tx - person.pos.x, 0, tz - person.pos.z);
+                _physicsBoundarySteer.normalize().multiplyScalar(MAX_FORCE * 0.5);
+                _physicsForce.add(_physicsBoundarySteer);
+            }
+        } else {
+            const probeDist = 2.5;
+            const px = person.pos.x, pz = person.pos.z;
+            const probes = [
+                [px + probeDist, pz], [px - probeDist, pz], [px, pz + probeDist], [px, pz - probeDist]
+            ];
+            let bestDistSq = Infinity;
+            let boundaryX = px, boundaryZ = pz;
+            for (let i = 0; i < probes.length; i++) {
+                const [qx, qz] = probes[i];
+                if (walkableSampler.getSurfaceInfo(qx, qz).inside) continue;
+                const n = walkableSampler.getNearestWalkable(qx, qz);
+                const dpx = px - n.x, dpz = pz - n.z;
+                const distSq = dpx * dpx + dpz * dpz;
+                if (distSq < bestDistSq && distSq > 1e-10) {
+                    bestDistSq = distSq;
+                    boundaryX = n.x;
+                    boundaryZ = n.z;
+                }
+            }
+            if (bestDistSq < Infinity) {
+                const distToEdge = Math.sqrt(bestDistSq);
+                if (distToEdge < BOUNDARY_SOFT_MARGIN) {
+                    const t = 1 - distToEdge / BOUNDARY_SOFT_MARGIN;
+                    const dx = px - boundaryX, dz = pz - boundaryZ;
+                    const inwardLen = Math.sqrt(dx * dx + dz * dz);
+                    const targetX = boundaryX + (dx / inwardLen) * BOUNDARY_PUSH_INWARD;
+                    const targetZ = boundaryZ + (dz / inwardLen) * BOUNDARY_PUSH_INWARD;
+                    _physicsBoundarySteer.set(targetX - px, 0, targetZ - pz);
+                    _physicsBoundarySteer.normalize().multiplyScalar(MAX_FORCE * 0.4 * t);
+                    _physicsForce.add(_physicsBoundarySteer);
+                }
+            }
         }
 
         // Goal Seeking
@@ -1644,7 +1686,7 @@ function applyPhysics(person) {
             _physicsDestination.subVectors(person.target, person.pos);
             const dist = _physicsDestination.length();
             _physicsDestination.normalize();
-            if (dist < 5) {
+            if (dist < 10) {
                 _physicsDestination.multiplyScalar(person.maxSpeed * (dist / 5));
             } else {
                 _physicsDestination.multiplyScalar(person.maxSpeed);
@@ -1662,76 +1704,30 @@ function applyPhysics(person) {
 
     person.acc.add(_physicsForce);
     person.vel.add(person.acc);
+
     if (person.state === 'SNAPPING') {
-        const snapTimer = person.snapTimer || 0;
-        if (snapTimer < 15) person.vel.multiplyScalar(0.92);
-        else if (snapTimer < SNAP_END_FRAME) person.vel.multiplyScalar(0.95);
-        else {
-            person.state = 'WANDER';
-            delete person.snapTimer;
-            delete person.snapFlashDone;
-            const nudge = person.maxSpeed * 0.35;
-            person.vel.set((Math.random() - 0.5) * 2 * nudge, 0, (Math.random() - 0.5) * 2 * nudge);
-        }
-        person.lastSnapFrame = frameCount;
-    }
-
-    person.vel.clampLength(0, person.maxSpeed);
-
-    const oldPosX = person.pos.x;
-    const oldPosZ = person.pos.z;
-
-    // Add velocity to position
-    _physicsCandidatePos.copy(person.pos).add(person.vel);
-    const distToCam = person.pos.distanceTo(camera.position);
-    const surfaceSampleEvery = distToCam > SURFACE_LOD_DISTANCE ? SURFACE_SAMPLE_EVERY_FAR : SURFACE_SAMPLE_EVERY;
-    const shouldSample = person._surfaceSampleFrame === undefined ||
-        (frameCount - person._surfaceSampleFrame >= surfaceSampleEvery) ||
-        (person._lastSurfaceX !== undefined && Math.hypot(_physicsCandidatePos.x - person._lastSurfaceX, _physicsCandidatePos.z - person._lastSurfaceZ) > SURFACE_SAMPLE_DISTANCE);
-
-    let info;
-    if (shouldSample) {
-        info = walkableSampler.getSurfaceInfo(_physicsCandidatePos.x, _physicsCandidatePos.z, person._surfaceCache);
-        person._surfaceSampleFrame = frameCount;
-        person._lastSurfaceY = info.y;
-        person._lastSurfaceInside = info.inside;
-        person._lastSurfaceX = _physicsCandidatePos.x;
-        person._lastSurfaceZ = _physicsCandidatePos.z;
+        person.vel.multiplyScalar(0.92);
     } else {
-        info = { inside: !!person._lastSurfaceInside, y: person._lastSurfaceY != null ? person._lastSurfaceY : null };
-    }
-
-    if (info.inside && info.y !== null) {
-        person._atSurfaceEdge = false;
-        person.pos.set(_physicsCandidatePos.x, info.y + FEET_SURFACE_Y_OFFSET / 2, _physicsCandidatePos.z);
-        if (person.prevPosition) person.prevPosition.copy(person.pos);
-    } else {
-        // Candidate step was off walkable (e.g. pavement edge). Don't apply move; steer back onto surface.
-        person._atSurfaceEdge = true;
-        person.vel.multiplyScalar(0.6);
-        const speed = person.vel.length();
-        const nudgeThreshold = person.maxSpeed * 0.08;
-        if (speed < nudgeThreshold && person.state === 'WANDER') {
-            person.vel.set(
-                (Math.random() - 0.5) * 2 * nudgeThreshold,
-                0,
-                (Math.random() - 0.5) * 2 * nudgeThreshold
-            );
-        } else if (speed > 0.01) {
-            // Steer back toward the walkable surface (reverse direction)
-            const nudgeSpeed = person.maxSpeed * 0.15;
-            person.vel.normalize().negate().multiplyScalar(nudgeSpeed);
-        }
         person.vel.clampLength(0, person.maxSpeed);
     }
 
-    person._displacement = Math.hypot(person.pos.x - oldPosX, person.pos.z - oldPosZ);
-
+    const oldPosX = person.pos.x;
+    const oldPosZ = person.pos.z;
+    person.pos.add(person.vel);
     person.acc.set(0, 0, 0);
 
-    if (person.state === 'SNAPPING') {
-        person.snapTimer = (person.snapTimer || 0) + 1;
+    // Hard-clamp to walkable: if off walkable, snap to nearest; set Y from surface height
+    const afterInfo = walkableSampler.getSurfaceInfo(person.pos.x, person.pos.z);
+    if (!afterInfo.inside) {
+        const nearest = walkableSampler.getNearestWalkable(person.pos.x, person.pos.z);
+        person.pos.x = nearest.x;
+        person.pos.z = nearest.z;
+        person.pos.y = nearest.y;
+    } else {
+        person.pos.y = afterInfo.y != null ? afterInfo.y : 0;
     }
+
+    person._displacement = Math.hypot(person.pos.x - oldPosX, person.pos.z - oldPosZ);
 
     return person;
 }
@@ -1878,6 +1874,7 @@ const SNAP_ARM_UP_ANGLE = -1.2;
 const SNAP_END_FRAME = 40;  // return to WANDER after this
 // Frames before a person who just finished SNAPPING can enter SEEK_LILY again (~2.5 s at 60fps)
 const SEEK_LILY_COOLDOWN_FRAMES = 150;
+const QUEUE_COOLDOWN_FRAMES = 150; // frames before a person can enter QUEUING again
 
 function animatePerson(person) {
     if (!person.mesh) {
@@ -1947,7 +1944,7 @@ const DUNELM_INSIDE_MAX_FRAMES = 210;
 function updateDecision(person) {
     // SNAPPING -> WANDER is handled in applyPhysics (velocity + lastSnapFrame set there)
     if (person.state === "WANDER") {
-        if (Math.random() < 0.001) {
+        if (Math.random() < 0.0001) {
             const framesSinceSnap = frameCount - (person.lastSnapFrame ?? -SEEK_LILY_COOLDOWN_FRAMES);
             if (framesSinceSnap > SEEK_LILY_COOLDOWN_FRAMES && lilies.length > 0) {
                 person.state = "SEEK_LILY";
@@ -1956,11 +1953,15 @@ function updateDecision(person) {
                 person.target = _lilyTargetPos.clone().add(new THREE.Vector3((Math.random() - 0.5) * 4, 0, (Math.random() - 0.5) * 4));
             }
 
-        } else if (Math.random() < 0.008) {
-            person.state = "QUEUING";
-            person.target = DUNELM_QUEUE_TARGET.clone();
+        } else if (Math.random() < 0.0001) {
+            const framesSinceQueue = frameCount - (person.lastQueueFrame ?? -QUEUE_COOLDOWN_FRAMES);
+            if (framesSinceQueue > QUEUE_COOLDOWN_FRAMES) {
+                person.state = "QUEUING";
+                person.target = DUNELM_QUEUE_TARGET.clone();
+                person.lastQueueFrame = frameCount;
+            }
         } else if (person.state === "SEEK_LILY" && lilies.length > 0) {
-            if (person.target != null && person.pos.distanceTo(person.target) < 10) {
+            if (person.target != null && person.pos.distanceTo(person.target) < 5) {
                 person.state = "SNAPPING";
                 person.snapPosition = person.target.clone();
                 person.target = null;
@@ -1968,8 +1969,14 @@ function updateDecision(person) {
                 person.snapFlashDone = false;
             }
         }
+    } else if (person.state === "SNAPPING") {
+        person.snapTimer = (person.snapTimer || 0) + 1;
+        if (person.snapTimer >= SNAP_END_FRAME) {
+            person.state = "WANDER";
+            person.lastSnapFrame = frameCount;
+            person.vel.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize().multiplyScalar(MAX_FORCE * 0.5);
+        }
     }
-    // QUEUING -> INSIDE is handled in animate loop when person is within DUNELM_DOOR_OPEN_RADIUS
     return person;
 }
 
@@ -2061,13 +2068,7 @@ function animate() {
         const i = (startIdx + k) % people.length;
         let person = people[i];
         if (!person || !person.pos || person.state === "INSIDE") continue;
-        if (frameCount % SNAP_END_FRAME === 0) {
-            if ((person.getPhone() != null) && (person.state !== "SNAPPING") && (Math.random() < 0.05)) {
-                person.state = "SNAPPING";
-                person.snapTimer = 0;
-                person.snapFlashDone = false;
-            }
-        }
+
         person = updateDecision(person);
         person = applyPhysics(person);
         animatePerson(person);

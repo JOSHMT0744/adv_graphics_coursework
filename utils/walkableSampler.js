@@ -261,7 +261,7 @@ export function createBSplineSampler(group, controlPoints) {
  * @returns {{ sample: () => THREE.Vector3 }}
  */
 export function createBridgeDeckSampler(cx, deckTopY, cz, scale, deckLength, deckWidth = 2) {
-    const halfW = (deckWidth * scale) / 2;
+    const halfW = (deckWidth * scale) / 3;
     const halfL = (deckLength * scale) / 2;
     const xMin = cx - halfW, xMax = cx + halfW, zMin = cz - halfL, zMax = cz + halfL;
     return {
@@ -673,6 +673,151 @@ export function createCombinedSampler(regions, options = {}) {
                 if (valid) hit = valid;
             }
             return { inside: true, y: hit.point.y };
+        },
+        /**
+         * World-bounds boundary info for steering: distance to nearest edge, outward normal (into walkable), nearest point on boundary.
+         * @param {number} x - world X
+         * @param {number} z - world Z
+         * @param {object} [cache] - unused; for API consistency with getSurfaceInfo
+         * @returns {{ distanceToEdge: number, outwardNormalX: number, outwardNormalZ: number, nearestBoundaryX: number, nearestBoundaryZ: number, outside: boolean }}
+         */
+        getBoundaryInfo(x, z, cache) {
+            const minX = gridMinX, maxX = gridMaxX, minZ = gridMinZ, maxZ = gridMaxZ;
+            const dMinX = x - minX, dMaxX = maxX - x, dMinZ = z - minZ, dMaxZ = maxZ - z;
+            const distanceToEdge = Math.min(dMinX, dMaxX, dMinZ, dMaxZ);
+            const outside = distanceToEdge < 0;
+            const nearestBoundaryX = Math.max(minX, Math.min(maxX, x));
+            const nearestBoundaryZ = Math.max(minZ, Math.min(maxZ, z));
+            let outwardNormalX = 0, outwardNormalZ = 0;
+            if (dMinX <= dMaxX && dMinX <= dMinZ && dMinX <= dMaxZ) {
+                outwardNormalX = 1;
+                outwardNormalZ = 0;
+            } else if (dMaxX <= dMinX && dMaxX <= dMinZ && dMaxX <= dMaxZ) {
+                outwardNormalX = -1;
+                outwardNormalZ = 0;
+            } else if (dMinZ <= dMinX && dMinZ <= dMaxX && dMinZ <= dMaxZ) {
+                outwardNormalX = 0;
+                outwardNormalZ = 1;
+            } else {
+                outwardNormalX = 0;
+                outwardNormalZ = -1;
+            }
+            return {
+                distanceToEdge,
+                outwardNormalX,
+                outwardNormalZ,
+                nearestBoundaryX,
+                nearestBoundaryZ,
+                outside
+            };
+        },
+        /**
+         * Nearest walkable point for steering/clamping when (x,z) is off walkable.
+         * @param {number} x - world X
+         * @param {number} z - world Z
+         * @returns {{ x: number, z: number, y: number, inside: boolean }}
+         */
+        getNearestWalkable(x, z) {
+            const info = this.getSurfaceInfo(x, z);
+            if (info.inside && info.y != null) {
+                return { x, z, y: info.y, inside: true };
+            }
+            if (!heightGrid || numX === 0 || numZ === 0) {
+                const nx = Math.max(gridMinX, Math.min(gridMaxX, x));
+                const nz = Math.max(gridMinZ, Math.min(gridMaxZ, z));
+                return { x: nx, z: nz, y: 0, inside: false };
+            }
+            const fx = (x - gridMinX) / cellSize;
+            const fz = (z - gridMinZ) / cellSize;
+            let ix = Math.floor(fx);
+            let iz = Math.floor(fz);
+            ix = Math.max(0, Math.min(numX - 1, ix));
+            iz = Math.max(0, Math.min(numZ - 1, iz));
+
+            function isWalkable(ci, cj) {
+                const y = getCellY(ci, cj);
+                return y === y;
+            }
+
+            function cellNearestPoint(ci, cj, px, pz) {
+                const cellMinX = gridMinX + ci * cellSize;
+                const cellMaxX = gridMinX + (ci + 1) * cellSize;
+                const cellMinZ = gridMinZ + cj * cellSize;
+                const cellMaxZ = gridMinZ + (cj + 1) * cellSize;
+                const nx = Math.max(cellMinX, Math.min(cellMaxX, px));
+                const nz = Math.max(cellMinZ, Math.min(cellMaxZ, pz));
+                return { nx, nz, distSq: (px - nx) ** 2 + (pz - nz) ** 2 };
+            }
+
+            if (isWalkable(ix, iz)) {
+                const cellMinX = gridMinX + ix * cellSize;
+                const cellMaxX = gridMinX + (ix + 1) * cellSize;
+                const cellMinZ = gridMinZ + iz * cellSize;
+                const cellMaxZ = gridMinZ + (iz + 1) * cellSize;
+                const nx = Math.max(cellMinX, Math.min(cellMaxX, x));
+                const nz = Math.max(cellMinZ, Math.min(cellMaxZ, z));
+                const y = getCellY(ix, iz);
+                return { x: nx, z: nz, y, inside: false };
+            }
+
+            const MAX_RADIUS = 15;
+            let bestDistSq = Infinity;
+            let bestNx = gridMinX + (ix + 0.5) * cellSize;
+            let bestNz = gridMinZ + (iz + 0.5) * cellSize;
+            let bestY = 0;
+
+            for (let r = 1; r <= MAX_RADIUS; r++) {
+                for (let di = -r; di <= r; di++) {
+                    for (let dj = -r; dj <= r; dj++) {
+                        if (Math.max(Math.abs(di), Math.abs(dj)) !== r) continue;
+                        const ci = ix + di;
+                        const cj = iz + dj;
+                        if (!isWalkable(ci, cj)) continue;
+                        const { nx, nz, distSq } = cellNearestPoint(ci, cj, x, z);
+                        if (distSq < bestDistSq) {
+                            bestDistSq = distSq;
+                            bestNx = nx;
+                            bestNz = nz;
+                            bestY = getCellY(ci, cj);
+                        }
+                    }
+                }
+                if (bestDistSq < Infinity) break;
+            }
+
+            if (bestDistSq === Infinity) {
+                bestNx = gridMinX + (ix + 0.5) * cellSize;
+                bestNz = gridMinZ + (iz + 0.5) * cellSize;
+            }
+            return { x: bestNx, z: bestNz, y: bestY, inside: false };
+        },
+        /**
+         * Get grid cell bounds for debug visualization.
+         * Returns array of Box3 objects representing each grid cell that has valid height data.
+         * @returns {THREE.Box3[]}
+         */
+        getGridCells() {
+            const cells = [];
+            if (!heightGrid || numX === 0 || numZ === 0) return cells;
+            for (let i = 0; i < numX; i++) {
+                for (let j = 0; j < numZ; j++) {
+                    const idx = i * numZ + j;
+                    const y = heightGrid[idx];
+                    // Only include cells with valid height data (not NaN)
+                    if (y === y && y !== HEIGHT_GRID_SENTINEL) {
+                        const cellMinX = gridMinX + i * cellSize;
+                        const cellMaxX = gridMinX + (i + 1) * cellSize;
+                        const cellMinZ = gridMinZ + j * cellSize;
+                        const cellMaxZ = gridMinZ + (j + 1) * cellSize;
+                        const cell = new THREE.Box3(
+                            new THREE.Vector3(cellMinX, y - 0.1, cellMinZ),
+                            new THREE.Vector3(cellMaxX, y + 0.1, cellMaxZ)
+                        );
+                        cells.push(cell);
+                    }
+                }
+            }
+            return cells;
         },
         regions
     };
