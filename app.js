@@ -228,6 +228,8 @@ composer.setPixelRatio(pixelRatio);
 const orbitControls = new OrbitControls(camera, renderer.domElement);
 orbitControls.enableDamping = true;
 orbitControls.dampingFactor = 0.05;
+orbitControls.minPolarAngle = 0;
+orbitControls.maxPolarAngle = Math.PI / 2;
 
 const controls = {
     moveSpeed: 1,
@@ -705,7 +707,7 @@ house2.rotateY(Math.PI / 1.2);
 house2.rotateZ(Math.PI / 32);
 house2.traverse((o) => { if (o.isMesh) { o.receiveShadow = false; o.castShadow = true; } });
 scene.add(house2);
-const house3 = createHouse(75.2, -14.4, -33, 2.2);
+const house3 = createHouse(75.2, -15.4, -33, 2.2);
 house3.rotateY(Math.PI / 1.4);
 house3.rotateZ(Math.PI / 32);
 house3.traverse((o) => { if (o.isMesh) { o.receiveShadow = false; o.castShadow = true; } });
@@ -1094,7 +1096,9 @@ const WALKABLE_WORLD_BOUNDS = new THREE.Box3(
 // ============================================================================
 const octree = new Octree(WALKABLE_WORLD_BOUNDS, { maxDepth: 5, minSize: 2 });
 const MAX_PLACEMENT_RETRIES = 20;
-const BOUNDARY_FORCE_MARGIN = 2.5;  // distance within which soft edge-normal repulsion applies; also used for placement so agents don't start in repulsion zone
+const BOUNDARY_SOFT_MARGIN = 3; // WHen within this distance of walkable boundary, gradual force encourages turning away
+const BOUNDARY_PUSH_INWARD = 1; // steer toward a point this far past nearest, to escape sliding along the edge
+const PERSON_BOUNDARY_MARGIN = 2; // steer/placement: keep people this far from world bounds (avoids stuck outside collision avoidance)
 
 const BRIDGE_DECK_REGION_INDEX = 5; // walkableRegions[5] = bridge deck; excluded from initial placement
 const walkableRegions = [
@@ -1410,7 +1414,7 @@ peopleFolder.open();
 
 const flockingFolder = gui.addFolder("Flocking Behavior");
 const sepCheckbox = flockingFolder.add(PARAMS.flocking.sep, "on").name("Separation");
-const sepSlider = flockingFolder.add(PARAMS.flocking.sep, "val", 0, 3, 0.1).name("Separation Weight");
+const sepSlider = flockingFolder.add(PARAMS.flocking.sep, "val", 0, 1, 0.05).name("Separation Weight");
 sepCheckbox.onChange((v) => {
     PARAMS.flocking.sep.on = v;
     sepSlider.__li.style.opacity = v ? 1 : 0.5;
@@ -1430,7 +1434,7 @@ aliSlider.__li.style.opacity = PARAMS.flocking.ali.on ? 1 : 0.5;
 aliSlider.domElement.disabled = !PARAMS.flocking.ali.on;
 
 const cohCheckbox = flockingFolder.add(PARAMS.flocking.coh, "on").name("Cohesion");
-const cohSlider = flockingFolder.add(PARAMS.flocking.coh, "val", 0, 3, 0.1).name("Cohesion Weight");
+const cohSlider = flockingFolder.add(PARAMS.flocking.coh, "val", 0, 1, 0.05).name("Cohesion Weight");
 cohCheckbox.onChange((v) => {
     PARAMS.flocking.coh.on = v;
     cohSlider.__li.style.opacity = v ? 1 : 0.5;
@@ -1691,15 +1695,10 @@ function modifyCrowd(n) {
             for (let retry = 0; retry < MAX_PLACEMENT_RETRIES && !placed; retry++) {
                 const sampleResult = walkableSampler.sampleRandom();
                 const pos = sampleResult instanceof THREE.Vector3 ? sampleResult : sampleResult.pos;
-                const wb = WALKABLE_WORLD_BOUNDS;
-                // Use boundary force margin so agents are never placed inside the repulsion zone (avoid stuck near edges)
-                const placementMargin = BOUNDARY_FORCE_MARGIN;
-                const insideBounds = pos.x >= wb.min.x + placementMargin && pos.x <= wb.max.x - placementMargin &&
-                    pos.z >= wb.min.z + placementMargin && pos.z <= wb.max.z - placementMargin;
-                if (!insideBounds) continue;
-                if (walkableSampler.regions[BRIDGE_DECK_REGION_INDEX].contains(pos.x, pos.z)) continue;
+                const insideWalkable = walkableSampler.getSurfaceInfo(pos.x, pos.z).inside;
+                if (!insideWalkable) continue;
 
-                let insideObstacle = false;
+                /*
                 for (const obj of environmentObjects) {
                     const box = obj.userData?.boundingBox;
                     if (box && box.containsPoint(pos)) {
@@ -1708,7 +1707,7 @@ function modifyCrowd(n) {
                     }
                 }
                 if (insideObstacle) continue;
-
+                */
                 const bounds = new THREE.Box3(
                     new THREE.Vector3(pos.x - PERSON_RADIUS, pos.y, pos.z - PERSON_RADIUS),
                     new THREE.Vector3(pos.x + PERSON_RADIUS, pos.y + CHARACTER_HEIGHT, pos.z + PERSON_RADIUS)
@@ -1851,7 +1850,8 @@ function applyPhysics(person) {
         }
 
         // avoid dunelm building (static objects)
-        /*const distDunelm = person.pos.distanceTo(dunelm.position);
+        /*
+        const distDunelm = person.pos.distanceTo(dunelm.position);
         if (distDunelm < dunelm.userData.radius) {
             _physicsAvoid.subVectors(person.pos, dunelm.position).normalize().multiplyScalar((dunelm.userData.radius - distDunelm) * 0.5);
             _physicsForce.add(_physicsAvoid);
@@ -1867,25 +1867,11 @@ function applyPhysics(person) {
                     _physicsForce.add(_physicsAvoid);
                 }
             }
-        }
-
-        const BOUNDARY_OBSTACLE_MARGIN = 5;
-        for (let i = 0; i < environmentObjects.length; i++) {
-            const obj = environmentObjects[i];
-            const box = obj.userData.boundingBox;
-            if (!box) continue;
-            if (box.containsPoint(person.pos)) {
-                const boxPoint = getClosestPointOnBoxSurface(box, person.pos, _physicsClampedPoint);
-                const distObj = person.pos.distanceTo(boxPoint);
-                _physicsAvoid.subVectors(person.pos, boxPoint).normalize().multiplyScalar((distObj - BOUNDARY_OBSTACLE_MARGIN) * 0.5);
-                _physicsForce.add(_physicsAvoid);
-            }
-        }
-        const onBridge = person._surfaceCache && person._surfaceCache.regionIndex === BRIDGE_DECK_REGION_INDEX;
+        }*/
 
         // Avoid environment obstacles (precomputed Box3 per object); push out when inside
-        /*const PERSON_ENV_AVOID_MARGIN = 0.5;
-        const BOUNDARY_OBSTACLE_MARGIN = 0.5;  // fence/pathFence: stronger repulsion so cohesion/goal-seeking cannot overpower
+        /*
+        const PERSON_ENV_AVOID_MARGIN = 0.5;
         const PERSON_ENV_AVOID_STRENGTH = 0.5;
         const PERSON_ENV_INSIDE_STRENGTH = 0.2;
         const onBridge = person._surfaceCache && person._surfaceCache.regionIndex === BRIDGE_DECK_REGION_INDEX;
@@ -1927,32 +1913,52 @@ function applyPhysics(person) {
             }
         }*/
 
-        // Boundary: edge-normal repulsion (softer near edge, no center-pull)
-        
-        const boundaryInfo = walkableSampler.getBoundaryInfo(person.pos.x, person.pos.z, person._surfaceCache);
-        if (onBridge) {
-            // Use bridge center X, not world bounds center, to prevent asymmetric clustering
-            _physicsBoundarySteer.set(BRIDGE_CENTER_X, 0, 0).sub(person.pos).normalize().multiplyScalar(PERSON_BOUNDARY_STRENGTH);
-            _physicsForce.add(_physicsBoundarySteer);
-            
-            // Along-bridge flow force: parallel to railings (Z direction) to encourage natural walking along bridge
-            if (person._bridgeFlowDir === undefined) {
-                // Set flow direction based on target if exists, otherwise random
-                if (person.target) {
-                    person._bridgeFlowDir = person.target.z > person.pos.z ? 1 : -1;
-                } else {
-                    person._bridgeFlowDir = Math.random() < 0.5 ? 1 : -1;
+        // Boundary containment: steer toward walkable when off walkable regions
+        const surfaceInfo = walkableSampler.getSurfaceInfo(person.pos.x, person.pos.z);
+        const nearest = walkableSampler.getNearestWalkable(person.pos.x, person.pos.z);
+        if (!surfaceInfo.inside) {
+            const dx = nearest.x - person.pos.x, dz = nearest.z - person.pos.z;
+            const lenSq = dx * dx + dz * dz;
+            if (lenSq > 1e-10) {
+                const inwardLen = Math.sqrt(lenSq);
+                const tx = nearest.x + (dx / inwardLen) * BOUNDARY_PUSH_INWARD;
+                const tz = nearest.z + (dz / inwardLen) * BOUNDARY_PUSH_INWARD;
+                _physicsBoundarySteer.set(tx - person.pos.x, 0, tz - person.pos.z);
+                _physicsBoundarySteer.normalize().multiplyScalar(MAX_FORCE * 0.5);
+                _physicsForce.add(_physicsBoundarySteer);
+            }
+        } else {
+            const probeDist = 2.5;
+            const px = person.pos.x, pz = person.pos.z;
+            const probes = [
+                [px + probeDist, pz], [px - probeDist, pz], [px, pz + probeDist], [px, pz - probeDist]
+            ];
+            let bestDistSq = Infinity;
+            let boundaryX = px, boundaryZ = pz;
+            for (let i = 0; i < probes.length; i++) {
+                const [qx, qz] = probes[i];
+                if (walkableSampler.getSurfaceInfo(qx, qz).inside) continue;
+                const n = walkableSampler.getNearestWalkable(qx, qz);
+                const dpx = px - n.x, dpz = pz - n.z;
+                const distSq = dpx * dpx + dpz * dpz;
+                if (distSq < bestDistSq && distSq > 1e-10) {
+                    bestDistSq = distSq;
+                    boundaryX = n.x;
+                    boundaryZ = n.z;
                 }
             }
-            _physicsAlongBridge.set(0, 0, person._bridgeFlowDir).multiplyScalar(BRIDGE_ALONG_FLOW_STRENGTH);
-            _physicsForce.add(_physicsAlongBridge);
-        } else {
-            // Not on bridge: clean up bridge flow direction if it exists
-            if (person._bridgeFlowDir !== undefined) delete person._bridgeFlowDir;
-            if (boundaryInfo.distanceToEdge < BOUNDARY_FORCE_MARGIN) {
-                const strength = PERSON_BOUNDARY_STRENGTH * (1 - boundaryInfo.distanceToEdge / BOUNDARY_FORCE_MARGIN);
-                _physicsBoundarySteer.set(boundaryInfo.outwardNormalX, 0, boundaryInfo.outwardNormalZ).multiplyScalar(strength);
-                _physicsForce.add(_physicsBoundarySteer);
+            if (bestDistSq < Infinity) {
+                const distToEdge = Math.sqrt(bestDistSq);
+                if (distToEdge < BOUNDARY_SOFT_MARGIN) {
+                    const t = 1 - distToEdge / BOUNDARY_SOFT_MARGIN;
+                    const dx = px - boundaryX, dz = pz - boundaryZ;
+                    const inwardLen = Math.sqrt(dx * dx + dz * dz);
+                    const targetX = boundaryX + (dx / inwardLen) * BOUNDARY_PUSH_INWARD;
+                    const targetZ = boundaryZ + (dz / inwardLen) * BOUNDARY_PUSH_INWARD;
+                    _physicsBoundarySteer.set(targetX - px, 0, targetZ - pz);
+                    _physicsBoundarySteer.normalize().multiplyScalar(MAX_FORCE * 0.4 * t);
+                    _physicsForce.add(_physicsBoundarySteer);
+                }
             }
         }
 
@@ -1960,21 +1966,14 @@ function applyPhysics(person) {
         if (person.target) {
             _physicsDestination.subVectors(person.target, person.pos);
             const dist = _physicsDestination.length();
-            
-            // Check if bridge target reached
-            if (onBridge && person.target.distanceTo(BRIDGE_FAR_TARGET) < 0.1 && dist < BRIDGE_TARGET_REACHED_DISTANCE) {
-                // Reached far end of bridge - clear target and continue wandering
-                person.target = null;
+            _physicsDestination.normalize();
+            if (dist < 10) {
+                _physicsDestination.multiplyScalar(person.maxSpeed * (dist / 5));
             } else {
-                _physicsDestination.normalize();
-                if (dist < 5) {
-                    _physicsDestination.multiplyScalar(person.maxSpeed * (dist / 5));
-                } else {
-                    _physicsDestination.multiplyScalar(person.maxSpeed);
-                }
-                _physicsClampResult.subVectors(_physicsDestination, person.vel).clampLength(0, MAX_FORCE);
-                _physicsForce.add(_physicsClampResult);
+                _physicsDestination.multiplyScalar(person.maxSpeed);
             }
+            _physicsClampResult.subVectors(_physicsDestination, person.vel).clampLength(0, MAX_FORCE);
+            _physicsForce.add(_physicsClampResult);
         } else if (person.state === 'WANDER') {
             if (onBridge) {
                 // Flow along bridge (Z): pick a direction once, then bias velocity along bridge axis
@@ -2001,242 +2000,27 @@ function applyPhysics(person) {
     _physicsForce.clampLength(0, MAX_FORCE * MAX_FORCE_CLAMP_FACTOR);
     person.acc.add(_physicsForce);
     person.vel.add(person.acc);
+
     if (person.state === 'SNAPPING') {
-        const snapTimer = person.snapTimer || 0;
-        if (snapTimer < 15) person.vel.multiplyScalar(0.92);
-        else if (snapTimer < SNAP_END_FRAME) person.vel.multiplyScalar(0.95);
-        else {
-            person.state = 'WANDER';
-            delete person.snapTimer;
-            delete person.snapFlashDone;
-            const nudge = person.maxSpeed * 0.35;
-            person.vel.set((Math.random() - 0.5) * 2 * nudge, 0, (Math.random() - 0.5) * 2 * nudge);
-        }
-        person.lastSnapFrame = frameCount;
-    }
-
-    person.vel.clampLength(0, person.maxSpeed);
-
-    // Proactive velocity reversal: when within BOUNDARY_REVERSE_MARGIN of axis-aligned boundary,
-    // zero out velocity component pointing outward so we never step off walkable area.
-    // If that leaves velocity zero or very small, set velocity to point inward (walk-back) so the person moves away from the boundary.
-    const BOUNDARY_REVERSE_MARGIN = 0.1;
-    const BOUNDARY_WALKBACK_SPEED = person.maxSpeed * 0.6;
-    if (!person._atSurfaceEdge) {
-        const boundaryInfoNow = walkableSampler.getBoundaryInfo(person.pos.x, person.pos.z, person._surfaceCache);
-        if (boundaryInfoNow.distanceToEdge < BOUNDARY_REVERSE_MARGIN && boundaryInfoNow.distanceToEdge >= 0) {
-            const outX = boundaryInfoNow.outwardNormalX, outZ = boundaryInfoNow.outwardNormalZ;
-            const velDotOut = person.vel.x * outX + person.vel.z * outZ;
-            if (velDotOut < 0) {
-                // Velocity has component pointing outward (away from walkable area); remove it
-                person.vel.x -= velDotOut * outX;
-                person.vel.z -= velDotOut * outZ;
-            }
-            // If horizontal (XZ) velocity is zero or very small, set walk-back so the person can move.
-            // Movement is in XZ; Y is overwritten by surface height, so vel.y alone does nothing and leaves them stuck.
-            const horizontalSpeedSq = person.vel.x * person.vel.x + person.vel.z * person.vel.z;
-            const minHorizontalSpeedSqAtBoundary = Math.pow(person.maxSpeed * 0.08, 2);
-            if (horizontalSpeedSq < minHorizontalSpeedSqAtBoundary) {
-                // Outward normal in getBoundaryInfo points INTO the walkable area; use it as walk-back direction
-                const normalLenSq = outX * outX + outZ * outZ;
-                if (normalLenSq > 0.001) {
-                    person.vel.set(outX, 0, outZ).normalize().multiplyScalar(BOUNDARY_WALKBACK_SPEED);
-                } else {
-                    // Fallback: move toward nearest boundary point (clamped position inside bounds)
-                    _physicsBoundarySteer.set(boundaryInfoNow.nearestBoundaryX, 0, boundaryInfoNow.nearestBoundaryZ).sub(person.pos).setY(0);
-                    if (_physicsBoundarySteer.lengthSq() > 0.001) {
-                        person.vel.copy(_physicsBoundarySteer.normalize().multiplyScalar(BOUNDARY_WALKBACK_SPEED));
-                    } else {
-                        person.vel.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize().multiplyScalar(BOUNDARY_WALKBACK_SPEED);
-                    }
-                }
-            }
-        }
+        person.vel.multiplyScalar(0.92);
+    } else {
+        person.vel.clampLength(0, person.maxSpeed);
     }
 
     const oldPosX = person.pos.x;
     const oldPosZ = person.pos.z;
+    person.pos.add(person.vel);
+    person.acc.set(0, 0, 0);
 
-    // Add velocity to position
-    _physicsCandidatePos.copy(person.pos).add(person.vel);
-
-    // Hard-body obstacle ejection: project candidate position out of all obstacle boxes.
-    // This is a hard constraint that cannot be overwhelmed by soft steering forces.
-    // Prevents people from getting stuck inside obstacles (e.g. bridge railings).
-    for (let i = 0; i < environmentObjects.length; i++) {
-        const obj = environmentObjects[i];
-        const box = obj.userData.boundingBox;
-        if (!box) continue;
-        if (!box.containsPoint(_physicsCandidatePos)) continue;
-
-        // Q3b: Compression on impact - trigger only when actually entering an obstacle box (not every frame)
-        // Add cooldown to prevent continuous bouncing: only trigger if compression animation is complete
-        if (person._compressionTimer === undefined || person._compressionTimer >= COMPRESSION_DURATION) {
-            person._compressionTimer = 0;
-            person._compressionMax = Math.min(0.3, person.vel.length() * 0.5);
-        }
-
-        // Find the nearest face of the box and push the candidate position outside it
-        getClosestPointOnBoxSurface(box, _physicsCandidatePos, _physicsClampedPoint);
-        const pushDir = _physicsAvoid.subVectors(_physicsCandidatePos, _physicsClampedPoint);
-        
-        if (pushDir.lengthSq() < 1e-10) {
-            // Exactly on a face -- nudge outward along the shortest axis
-            const sx = box.max.x - box.min.x;
-            const sz = box.max.z - box.min.z;
-            if (sx < sz) pushDir.set(_physicsCandidatePos.x < (box.min.x + box.max.x) * 0.5 ? -1 : 1, 0, 0);
-            else pushDir.set(0, 0, _physicsCandidatePos.z < (box.min.z + box.max.z) * 0.5 ? -1 : 1);
-        }
-        pushDir.normalize();
-        // Project to just outside the box surface + a small epsilon
-        _physicsCandidatePos.copy(_physicsClampedPoint).addScaledVector(pushDir, 0.05);
-        // Kill the velocity component that was pushing into the obstacle
-        const velDot = person.vel.dot(pushDir);
-        if (velDot < 0) {
-            person.vel.addScaledVector(pushDir, -velDot);
-        }
-    }
-
-    // Option C: reject step if segment crosses fence/pathFence (hard block on crossing boundary obstacles)
-    const segmentLen = person.pos.distanceTo(_physicsCandidatePos);
-    if (segmentLen > 1e-6) {
-        _physicsRay.set(person.pos, _physicsRayHit.subVectors(_physicsCandidatePos, person.pos).normalize());
-        for (let i = 0; i < environmentObjects.length; i++) {
-            const obj = environmentObjects[i];
-            if (!obj.userData?.isBoundaryObstacle) continue;
-            const box = obj.userData.boundingBox;
-            if (!box) continue;
-            const hit = _physicsRay.intersectBox(box, _physicsRayHit);
-            if (hit != null && person.pos.distanceTo(hit) <= segmentLen + 1e-4) {
-                // Q3b: Compression on impact - trigger compression animation when colliding with obstacle
-                // Add cooldown to prevent continuous bouncing: only trigger if compression animation is complete
-                if (person._compressionTimer === undefined || person._compressionTimer >= COMPRESSION_DURATION) {
-                    person._compressionTimer = 0;
-                    person._compressionMax = Math.min(0.3, person.vel.length() * 0.5);  // Compression amount based on impact velocity
-                }
-                
-                const walkBackSpeed = person.maxSpeed * 0.7;
-                box.clampPoint(person.pos, _physicsClampedPoint);
-                _physicsAvoid.subVectors(person.pos, _physicsClampedPoint).setY(0);
-                if (_physicsAvoid.lengthSq() > 1e-6) {
-                    person.vel.copy(_physicsAvoid.normalize().multiplyScalar(walkBackSpeed));
-                } else {
-                    person.vel.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize().multiplyScalar(walkBackSpeed);
-                }
-                _physicsCandidatePos.copy(person.pos);
-                break;
-            }
-        }
-    }
-
-    const distToCam = person.pos.distanceTo(camera.position);
-    const surfaceSampleEvery = distToCam > SURFACE_LOD_DISTANCE ? SURFACE_SAMPLE_EVERY_FAR : SURFACE_SAMPLE_EVERY;
-    const shouldSample = person._surfaceSampleFrame === undefined ||
-        (frameCount - person._surfaceSampleFrame >= surfaceSampleEvery) ||
-        (person._lastSurfaceX !== undefined && Math.hypot(_physicsCandidatePos.x - person._lastSurfaceX, _physicsCandidatePos.z - person._lastSurfaceZ) > SURFACE_SAMPLE_DISTANCE);
-
-    let info;
-    if (shouldSample) {
-        info = walkableSampler.getSurfaceInfo(_physicsCandidatePos.x, _physicsCandidatePos.z, person._surfaceCache);
-        person._surfaceSampleFrame = frameCount;
-        person._lastSurfaceY = info.y;
-        person._lastSurfaceInside = info.inside;
-        person._lastSurfaceX = _physicsCandidatePos.x;
-        person._lastSurfaceZ = _physicsCandidatePos.z;
+    // Hard-clamp to walkable: if off walkable, snap to nearest; set Y from surface height
+    const afterInfo = walkableSampler.getSurfaceInfo(person.pos.x, person.pos.z);
+    if (!afterInfo.inside) {
+        const nearest = walkableSampler.getNearestWalkable(person.pos.x, person.pos.z);
+        person.pos.x = nearest.x;
+        person.pos.z = nearest.z;
+        person.pos.y = nearest.y;
     } else {
-        // Only use cached info if candidate is within SURFACE_SAMPLE_DISTANCE of cached position
-        // Prevents using stale cache data for a different position (e.g., at boundaries)
-        const distToCached = person._lastSurfaceX != null
-            ? Math.hypot(_physicsCandidatePos.x - person._lastSurfaceX, _physicsCandidatePos.z - person._lastSurfaceZ)
-            : Infinity;
-        if (distToCached <= SURFACE_SAMPLE_DISTANCE) {
-            info = { inside: !!person._lastSurfaceInside, y: person._lastSurfaceY != null ? person._lastSurfaceY : null };
-        } else {
-            // Too far from cached position; must sample to get accurate info for this candidate
-            info = walkableSampler.getSurfaceInfo(_physicsCandidatePos.x, _physicsCandidatePos.z, person._surfaceCache);
-            person._surfaceSampleFrame = frameCount;
-            person._lastSurfaceY = info.y;
-            person._lastSurfaceInside = info.inside;
-            person._lastSurfaceX = _physicsCandidatePos.x;
-            person._lastSurfaceZ = _physicsCandidatePos.z;
-        }
-    }
-
-    if (info.inside && info.y !== null) {
-        person._atSurfaceEdge = false;
-        person.pos.set(_physicsCandidatePos.x, info.y + FEET_SURFACE_Y_OFFSET / 2, _physicsCandidatePos.z);
-        if (person.prevPosition) person.prevPosition.copy(person.pos);
-    } else {
-        // Candidate step was off walkable. Set velocity perpendicular to boundary (inward) so they walk back onto surface.
-        person._atSurfaceEdge = true;
-        const walkBackSpeed = person.maxSpeed * 0.7;
-        // Use current position for boundary direction (more reliable than off-surface candidate position)
-        const boundaryInfo = walkableSampler.getBoundaryInfo(person.pos.x, person.pos.z, person._surfaceCache);
-        
-        // Try to get valid surface info for current position to update Y coordinate
-        // This ensures person stays on surface even when candidate is rejected
-        const currentPosInfo = walkableSampler.getSurfaceInfo(person.pos.x, person.pos.z, person._surfaceCache);
-        if (currentPosInfo.inside && currentPosInfo.y !== null) {
-            person.pos.y = currentPosInfo.y + FEET_SURFACE_Y_OFFSET / 2;
-            if (person.prevPosition) person.prevPosition.copy(person.pos);
-        }
-        
-        // Set walk-back velocity pointing inward (toward walkable area)
-        // In getBoundaryInfo the "outward" normal points INTO the walkable area, so use it directly as walk-back direction
-        const normalLenSq = boundaryInfo.outwardNormalX * boundaryInfo.outwardNormalX + boundaryInfo.outwardNormalZ * boundaryInfo.outwardNormalZ;
-        if (normalLenSq > 0.001) {
-            person.vel.set(boundaryInfo.outwardNormalX, 0, boundaryInfo.outwardNormalZ).normalize().multiplyScalar(walkBackSpeed);
-        } else {
-            // Fallback: move toward nearest boundary point (which is inside the walkable area)
-            _physicsBoundarySteer.set(boundaryInfo.nearestBoundaryX, 0, boundaryInfo.nearestBoundaryZ).sub(person.pos).setY(0);
-            if (_physicsBoundarySteer.lengthSq() > 0.001) {
-                person.vel.copy(_physicsBoundarySteer.normalize().multiplyScalar(walkBackSpeed));
-            } else {
-                // Last resort: move away from rejected candidate position
-                _physicsBoundarySteer.subVectors(person.pos, _physicsCandidatePos).setY(0);
-                if (_physicsBoundarySteer.lengthSq() > 0.001) {
-                    person.vel.copy(_physicsBoundarySteer.normalize().multiplyScalar(walkBackSpeed));
-                } else {
-                    person.vel.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize().multiplyScalar(walkBackSpeed);
-                }
-            }
-        }
-        person.state = 'WANDER';
-        person.vel.clampLength(0, person.maxSpeed);
-        
-        // CRITICAL FIX: Even when candidate is rejected, allow a small movement toward walkable area
-        // This prevents getting stuck when repeatedly rejecting the same candidate position
-        // Move a small step in the walk-back direction to break out of the stuck state
-        const smallStep = 0.05; // Small step size to avoid overshooting
-        const walkBackDir = person.vel.clone().normalize();
-        const smallStepPos = person.pos.clone().add(walkBackDir.multiplyScalar(smallStep));
-        const smallStepInfo = walkableSampler.getSurfaceInfo(smallStepPos.x, smallStepPos.z, person._surfaceCache);
-        if (smallStepInfo.inside && smallStepInfo.y !== null) {
-            // Small step is valid, update position
-            person.pos.set(smallStepPos.x, smallStepInfo.y + FEET_SURFACE_Y_OFFSET / 2, smallStepPos.z);
-            if (person.prevPosition) person.prevPosition.copy(person.pos);
-        }
-        
-        // Invalidate surface cache when rejecting to prevent using stale data next frame
-        // Clear cached position so we force a fresh sample next frame
-        person._lastSurfaceX = undefined;
-        person._lastSurfaceZ = undefined;
-        person._lastSurfaceInside = undefined;
-        person._lastSurfaceY = null;
-    }
-
-    // Ensure velocity never stays zero: repeated multiplications can leave vel ≈ 0 and they'd never move again.
-    // Also ensure horizontal (XZ) speed is never effectively zero - movement is in XZ; Y is overwritten by surface height.
-    if (person.state !== 'SNAPPING') {
-        const minSpeedSq = Math.pow(person.maxSpeed * 0.05, 2);
-        const minHorizontalSpeedSq = Math.pow(person.maxSpeed * 0.06, 2);
-        const horizontalSpeedSq = person.vel.x * person.vel.x + person.vel.z * person.vel.z;
-        if (person.vel.lengthSq() < minSpeedSq) {
-            person.vel.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize().multiplyScalar(person.maxSpeed * 0.25);
-        } else if (horizontalSpeedSq < minHorizontalSpeedSq) {
-            // Velocity has magnitude but no horizontal component (e.g. only Y) - person would be stuck in XZ
-            person.vel.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize().multiplyScalar(person.maxSpeed * 0.25);
-        }
+        person.pos.y = afterInfo.y != null ? afterInfo.y : 0;
     }
 
     person._displacement = Math.hypot(person.pos.x - oldPosX, person.pos.z - oldPosZ);
@@ -2412,9 +2196,7 @@ const SNAP_ARM_UP_ANGLE = -1.2;
 const SNAP_END_FRAME = 40;  // return to WANDER after this
 // Frames before a person who just finished SNAPPING can enter SEEK_LILY again (~2.5 s at 60fps)
 const SEEK_LILY_COOLDOWN_FRAMES = 150;
-
-// Q3b: Compression animation constants
-const COMPRESSION_DURATION = 6;  // Frames for compression/recovery animation
+const QUEUE_COOLDOWN_FRAMES = 150; // frames before a person can enter QUEUING again
 
 function animatePerson(person) {
     if (!person.mesh) {
@@ -2573,7 +2355,7 @@ function updateDecision(person) {
     }
     
     if (person.state === "WANDER") {
-        if (Math.random() < 0.001) {
+        if (Math.random() < 0.0001) {
             const framesSinceSnap = frameCount - (person.lastSnapFrame ?? -SEEK_LILY_COOLDOWN_FRAMES);
             if (framesSinceSnap > SEEK_LILY_COOLDOWN_FRAMES && lilies.length > 0) {
                 person.state = "SEEK_LILY";
@@ -2582,11 +2364,15 @@ function updateDecision(person) {
                 person.target = _lilyTargetPos.clone().add(new THREE.Vector3((Math.random() - 0.5) * 4, 0, (Math.random() - 0.5) * 4));
             }
 
-        } else if (Math.random() < 0.0008) {
-            person.state = "QUEUING";
-            person.target = DUNELM_QUEUE_TARGET.clone();
+        } else if (Math.random() < 0.0001) {
+            const framesSinceQueue = frameCount - (person.lastQueueFrame ?? -QUEUE_COOLDOWN_FRAMES);
+            if (framesSinceQueue > QUEUE_COOLDOWN_FRAMES) {
+                person.state = "QUEUING";
+                person.target = DUNELM_QUEUE_TARGET.clone();
+                person.lastQueueFrame = frameCount;
+            }
         } else if (person.state === "SEEK_LILY" && lilies.length > 0) {
-            if (person.target != null && person.pos.distanceTo(person.target) < 10) {
+            if (person.target != null && person.pos.distanceTo(person.target) < 5) {
                 person.state = "SNAPPING";
                 person.snapPosition = person.target.clone();
                 person.target = null;
@@ -2594,8 +2380,14 @@ function updateDecision(person) {
                 person.snapFlashDone = false;
             }
         }
+    } else if (person.state === "SNAPPING") {
+        person.snapTimer = (person.snapTimer || 0) + 1;
+        if (person.snapTimer >= SNAP_END_FRAME) {
+            person.state = "WANDER";
+            person.lastSnapFrame = frameCount;
+            person.vel.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize().multiplyScalar(MAX_FORCE * 0.5);
+        }
     }
-    // QUEUING -> INSIDE is handled in animate loop when person is within DUNELM_DOOR_OPEN_RADIUS
     return person;
 }
 
@@ -2697,13 +2489,7 @@ function animate() {
         const i = (startIdx + k) % people.length;
         let person = people[i];
         if (!person || !person.pos || person.state === "INSIDE") continue;
-        if (frameCount % SNAP_END_FRAME === 0) {
-            if ((person.getPhone() != null) && (person.state !== "SNAPPING") && (Math.random() < 0.05)) {
-                person.state = "SNAPPING";
-                person.snapTimer = 0;
-                person.snapFlashDone = false;
-            }
-        }
+
         person = updateDecision(person);
         person = applyPhysics(person);
         animatePerson(person);

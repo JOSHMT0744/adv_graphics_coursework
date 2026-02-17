@@ -261,7 +261,7 @@ export function createBSplineSampler(group, controlPoints) {
  * @returns {{ sample: () => THREE.Vector3 }}
  */
 export function createBridgeDeckSampler(cx, deckTopY, cz, scale, deckLength, deckWidth = 2) {
-    const halfW = (deckWidth * scale) / 2;
+    const halfW = (deckWidth * scale) / 3;
     const halfL = (deckLength * scale) / 2;
     const xMin = cx - halfW, xMax = cx + halfW, zMin = cz - halfL, zMax = cz + halfL;
     return {
@@ -712,6 +712,86 @@ export function createCombinedSampler(regions, options = {}) {
                 nearestBoundaryZ,
                 outside
             };
+        },
+        /**
+         * Nearest walkable point for steering/clamping when (x,z) is off walkable.
+         * @param {number} x - world X
+         * @param {number} z - world Z
+         * @returns {{ x: number, z: number, y: number, inside: boolean }}
+         */
+        getNearestWalkable(x, z) {
+            const info = this.getSurfaceInfo(x, z);
+            if (info.inside && info.y != null) {
+                return { x, z, y: info.y, inside: true };
+            }
+            if (!heightGrid || numX === 0 || numZ === 0) {
+                const nx = Math.max(gridMinX, Math.min(gridMaxX, x));
+                const nz = Math.max(gridMinZ, Math.min(gridMaxZ, z));
+                return { x: nx, z: nz, y: 0, inside: false };
+            }
+            const fx = (x - gridMinX) / cellSize;
+            const fz = (z - gridMinZ) / cellSize;
+            let ix = Math.floor(fx);
+            let iz = Math.floor(fz);
+            ix = Math.max(0, Math.min(numX - 1, ix));
+            iz = Math.max(0, Math.min(numZ - 1, iz));
+
+            function isWalkable(ci, cj) {
+                const y = getCellY(ci, cj);
+                return y === y;
+            }
+
+            function cellNearestPoint(ci, cj, px, pz) {
+                const cellMinX = gridMinX + ci * cellSize;
+                const cellMaxX = gridMinX + (ci + 1) * cellSize;
+                const cellMinZ = gridMinZ + cj * cellSize;
+                const cellMaxZ = gridMinZ + (cj + 1) * cellSize;
+                const nx = Math.max(cellMinX, Math.min(cellMaxX, px));
+                const nz = Math.max(cellMinZ, Math.min(cellMaxZ, pz));
+                return { nx, nz, distSq: (px - nx) ** 2 + (pz - nz) ** 2 };
+            }
+
+            if (isWalkable(ix, iz)) {
+                const cellMinX = gridMinX + ix * cellSize;
+                const cellMaxX = gridMinX + (ix + 1) * cellSize;
+                const cellMinZ = gridMinZ + iz * cellSize;
+                const cellMaxZ = gridMinZ + (iz + 1) * cellSize;
+                const nx = Math.max(cellMinX, Math.min(cellMaxX, x));
+                const nz = Math.max(cellMinZ, Math.min(cellMaxZ, z));
+                const y = getCellY(ix, iz);
+                return { x: nx, z: nz, y, inside: false };
+            }
+
+            const MAX_RADIUS = 15;
+            let bestDistSq = Infinity;
+            let bestNx = gridMinX + (ix + 0.5) * cellSize;
+            let bestNz = gridMinZ + (iz + 0.5) * cellSize;
+            let bestY = 0;
+
+            for (let r = 1; r <= MAX_RADIUS; r++) {
+                for (let di = -r; di <= r; di++) {
+                    for (let dj = -r; dj <= r; dj++) {
+                        if (Math.max(Math.abs(di), Math.abs(dj)) !== r) continue;
+                        const ci = ix + di;
+                        const cj = iz + dj;
+                        if (!isWalkable(ci, cj)) continue;
+                        const { nx, nz, distSq } = cellNearestPoint(ci, cj, x, z);
+                        if (distSq < bestDistSq) {
+                            bestDistSq = distSq;
+                            bestNx = nx;
+                            bestNz = nz;
+                            bestY = getCellY(ci, cj);
+                        }
+                    }
+                }
+                if (bestDistSq < Infinity) break;
+            }
+
+            if (bestDistSq === Infinity) {
+                bestNx = gridMinX + (ix + 0.5) * cellSize;
+                bestNz = gridMinZ + (iz + 0.5) * cellSize;
+            }
+            return { x: bestNx, z: bestNz, y: bestY, inside: false };
         },
         /**
          * Get grid cell bounds for debug visualization.
