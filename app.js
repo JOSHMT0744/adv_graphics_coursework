@@ -1888,7 +1888,7 @@ function applyPhysics(person) {
             const surf = walkableSampler.getSurfaceInfo(person.pos.x, person.pos.z);
             person.pos.y = (surf.inside && surf.y != null) ? surf.y : walkableSampler.getNearestWalkable(person.pos.x, person.pos.z).y;
             const vOut = person.vel.x * _envClampNormal.x + person.vel.y * _envClampNormal.y + person.vel.z * _envClampNormal.z;
-            if (vOut > 0) {
+            if (vOut < 0) {
                 person.vel.x -= vOut * _envClampNormal.x;
                 person.vel.y -= vOut * _envClampNormal.y;
                 person.vel.z -= vOut * _envClampNormal.z;
