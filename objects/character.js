@@ -330,33 +330,35 @@ export class Figure {
         const matSkin = new THREE.MeshStandardMaterial({ color: skin });
         const matBody = Figure.getInstanceMaterial();
 
+        // Match buildPersonMesh: torso center 1.25 (legs 0–0.75, torso 0.5–2.0)
         const bodyGeo = new THREE.BoxGeometry(1, 1.5, 1);
-        bodyGeo.translate(0, 0.75, 0);
+        bodyGeo.translate(0, 1.25, 0);
 
         const headGeo = new THREE.BoxGeometry(1.4, 1.4, 1.4);
-        headGeo.translate(0, 1.65, 0);
+        headGeo.translate(0, 2.45, 0); // head center = torsoCenter + torsoHeight/2 + 0.7 = 1.25 + 0.5 + 0.7
 
-        // Legs: limb technique — box, translate so centre at origin, then position (reference style)
+        // Legs: same as buildPersonMesh — hip at y=legHeight (0.75), feet at y=0; geometry has hip at local y=0 after translate
         const legHeight = 0.75;
         const legGeo = new THREE.BoxGeometry(0.28, legHeight, 0.28);
         legGeo.translate(0, -legHeight / 2, 0);
         const legLeft = legGeo.clone();
-        legLeft.applyMatrix4(new THREE.Matrix4().makeTranslation(-0.36, legHeight / 2, 0));
+        legLeft.applyMatrix4(new THREE.Matrix4().makeTranslation(-0.36, legHeight, 0));
         const legRight = legGeo.clone();
-        legRight.applyMatrix4(new THREE.Matrix4().makeTranslation(0.36, legHeight / 2, 0));
+        legRight.applyMatrix4(new THREE.Matrix4().makeTranslation(0.36, legHeight, 0));
         legGeo.dispose();
 
-        // Arms: same limb technique — box, translate(0, -halfHeight, 0), then position + rotate (shoulder 0.625, 1.1)
+        // Arms: shoulder at 1.55 to match buildPersonMesh (torsoCenter + torsoHeight/2 - 0.2)
         const armHeight = 1;
+        const shoulderY = 1.55;
         const armGeo = new THREE.BoxGeometry(0.25, armHeight, 0.25);
         armGeo.translate(0, -armHeight / 2, 0);
         const armLeft = armGeo.clone();
         armLeft.applyMatrix4(
-            new THREE.Matrix4().makeTranslation(0.625, 1.1, 0).multiply(new THREE.Matrix4().makeRotationZ(Math.PI / 12))
+            new THREE.Matrix4().makeTranslation(0.625, shoulderY, 0).multiply(new THREE.Matrix4().makeRotationZ(Math.PI / 12))
         );
         const armRight = armGeo.clone();
         armRight.applyMatrix4(
-            new THREE.Matrix4().makeTranslation(-0.625, 1.1, 0).multiply(new THREE.Matrix4().makeRotationZ(-Math.PI / 12))
+            new THREE.Matrix4().makeTranslation(-0.625, shoulderY, 0).multiply(new THREE.Matrix4().makeRotationZ(-Math.PI / 12))
         );
         armGeo.dispose();
 
@@ -416,28 +418,30 @@ export class Figure {
      * Parts: 0=body, 1=head, 2=legL, 3=legR, 4=armL, 5=armR.
      */
     static getInstanceGeometryHighOnly() {
+        // Match buildPersonMesh: torso center 1.25, head center 2.45, shoulder 1.55; feet at y=0; leg hip at y=legHeight (0.75)
         const bodyGeo = new THREE.BoxGeometry(1, 1.5, 1);
-        bodyGeo.translate(0, 0.75, 0);
+        bodyGeo.translate(0, 1.25, 0);
         const headGeo = new THREE.BoxGeometry(1.4, 1.4, 1.4);
-        headGeo.translate(0, 1.65, 0);
+        headGeo.translate(0, 2.45, 0);
         const legHeight = 0.75;
         const legGeo = new THREE.BoxGeometry(0.28, legHeight, 0.28);
         legGeo.translate(0, -legHeight / 2, 0);
         const legLeft = legGeo.clone();
-        legLeft.applyMatrix4(new THREE.Matrix4().makeTranslation(-0.36, legHeight / 2, 0));
+        legLeft.applyMatrix4(new THREE.Matrix4().makeTranslation(-0.36, legHeight, 0));
         const legRight = legGeo.clone();
-        legRight.applyMatrix4(new THREE.Matrix4().makeTranslation(0.36, legHeight / 2, 0));
+        legRight.applyMatrix4(new THREE.Matrix4().makeTranslation(0.36, legHeight, 0));
         legGeo.dispose();
         const armHeight = 1;
+        const shoulderY = 1.55;
         const armGeo = new THREE.BoxGeometry(0.25, armHeight, 0.25);
         armGeo.translate(0, -armHeight / 2, 0);
         const armLeft = armGeo.clone();
         armLeft.applyMatrix4(
-            new THREE.Matrix4().makeTranslation(0.625, 1.1, 0).multiply(new THREE.Matrix4().makeRotationZ(Math.PI / 12))
+            new THREE.Matrix4().makeTranslation(0.625, shoulderY, 0).multiply(new THREE.Matrix4().makeRotationZ(Math.PI / 12))
         );
         const armRight = armGeo.clone();
         armRight.applyMatrix4(
-            new THREE.Matrix4().makeTranslation(-0.625, 1.1, 0).multiply(new THREE.Matrix4().makeRotationZ(-Math.PI / 12))
+            new THREE.Matrix4().makeTranslation(-0.625, shoulderY, 0).multiply(new THREE.Matrix4().makeRotationZ(-Math.PI / 12))
         );
         armGeo.dispose();
         const merged = mergeGeometries([bodyGeo, headGeo, legLeft, legRight, armLeft, armRight]);
@@ -465,17 +469,17 @@ export class Figure {
 }
 
 /**
- * Lightweight crowd entity with Figure-like attributes (pos, rotationY) for octree/LOD and animate loop.
- * @param {{ position: THREE.Vector3, id: number, bounds: THREE.Box3, rotationY?: number }} options
+ * Lightweight crowd entity with Figure-like attributes (pos, rotationY) for quadtree/LOD and animate loop.
+ * @param {{ position: THREE.Vector3, id: number, bounds2D: { minX, maxX, minZ, maxZ }, rotationY?: number }} options
  */
 export class CrowdCharacter {
     constructor(options = {}) {
-        const { position, id, bounds, rotationY = Math.random() * Math.PI * 2 } = options;
+        const { position, id, bounds2D, rotationY = Math.random() * Math.PI * 2 } = options;
         this.id = id;
         this.pos = position ? position.clone() : new THREE.Vector3();
         this.prevPosition = this.pos.clone();
         this.rotationY = rotationY;
-        this.bounds = bounds;
+        this.bounds2D = bounds2D;
     }
 }
 
@@ -720,7 +724,7 @@ export function createPersonWithLOD(options = {}) {
 }
 
 /**
- * Create crowd person data for instanced rendering (no mesh). Has pos, vel, bounds, bodyColor, facingAngle.
+ * Create crowd person data for instanced rendering (no mesh). Has pos, vel, bounds2D, bodyColor, facingAngle.
  * getPhone() returns null; triggerFlash() is no-op.
  */
 export function createCrowdPerson(options = {}) {
@@ -753,12 +757,12 @@ export function createCrowdPerson(options = {}) {
         maxSpeed: MAX_SPEED * (0.9 + Math.random() * 0.2),
         mesh: null,
         parts: null,
-        bounds: null,
+        bounds2D: null,
         bodyColor,
         getPhone: () => null,
         triggerFlash: () => {},
         _surfaceCache,
-        _lastOctreePos: position ? position.clone() : pos.clone()
+        _lastQuadtreePos: { x: pos.x, z: pos.z }
     };
     return person;
 }

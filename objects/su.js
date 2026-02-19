@@ -355,9 +355,10 @@ export function createDunelmHouse(x = 0, z = 0, scale = 1, options = {}) {
     const hingeZ = doorCenterZ + doorWidth / 2; // 0.3 (back edge of centered door)
     const doorGroup = new THREE.Group();
     doorGroup.position.set(hingeX, doorCenterY, hingeZ);
+    const doorMat = new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.6, metalness: 0.1 });
     const doorPanel = new THREE.Mesh(
         new THREE.BoxGeometry(doorThickness, doorHeight, doorWidth),
-        concreteMat
+        doorMat
     );
     doorPanel.position.set(doorThickness / 2, 0, -doorWidth / 2); // hinge at group origin (front-left)
     doorGroup.add(doorPanel);

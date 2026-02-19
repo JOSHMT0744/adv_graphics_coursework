@@ -579,6 +579,8 @@ export function createCombinedSampler(regions, options = {}) {
                 if (cache && cache.inside && typeof cache.cellIx === 'number' && typeof cache.cellIz === 'number' && cache.cellIx === cellIx && cache.cellIz === cellIz) {
                     const distSq = (typeof cache._lastX === 'number' && typeof cache._lastZ === 'number')
                         ? (x - cache._lastX) ** 2 + (z - cache._lastZ) ** 2 : 0;
+
+                    // If in same cell, we can assume y valu hasn't changed, and so can replace cached x,z with new values
                     if (distSq <= 0.1) {
                         if (cache) { cache._lastX = x; cache._lastZ = z; }
                         return {

@@ -278,8 +278,7 @@ export function createOctreeDebugLines(boxes, options = {}) {
     const line = new THREE.LineSegments(merged, new THREE.LineBasicMaterial({
         color: options.color ?? 0x00ff88,
         depthTest: false,
-        depthWrite: false,
-        renderOrder: 999
+        depthWrite: false
     }));
     line.renderOrder = 999;
     line.frustumCulled = false;
