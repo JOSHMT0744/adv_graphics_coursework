@@ -1294,10 +1294,6 @@ camera.layers.enable(1); // see window meshes (layer 1)
 const stats = Stats();
 document.body.appendChild(stats.dom);
 
-const axesHelper = new THREE.AxesHelper(5);
-scene.add(axesHelper);
-axesHelper.matrixAutoUpdate = false;
-
 const gui = new GUI({ name: "Lumiere GUI" });
 const cameraFolder = gui.addFolder("Camera");
 cameraFolder.add(camera.position, "z", 0, 10);
