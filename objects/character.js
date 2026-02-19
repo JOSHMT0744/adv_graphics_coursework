@@ -469,17 +469,17 @@ export class Figure {
 }
 
 /**
- * Lightweight crowd entity with Figure-like attributes (pos, rotationY) for octree/LOD and animate loop.
- * @param {{ position: THREE.Vector3, id: number, bounds: THREE.Box3, rotationY?: number }} options
+ * Lightweight crowd entity with Figure-like attributes (pos, rotationY) for quadtree/LOD and animate loop.
+ * @param {{ position: THREE.Vector3, id: number, bounds2D: { minX, maxX, minZ, maxZ }, rotationY?: number }} options
  */
 export class CrowdCharacter {
     constructor(options = {}) {
-        const { position, id, bounds, rotationY = Math.random() * Math.PI * 2 } = options;
+        const { position, id, bounds2D, rotationY = Math.random() * Math.PI * 2 } = options;
         this.id = id;
         this.pos = position ? position.clone() : new THREE.Vector3();
         this.prevPosition = this.pos.clone();
         this.rotationY = rotationY;
-        this.bounds = bounds;
+        this.bounds2D = bounds2D;
     }
 }
 
@@ -724,7 +724,7 @@ export function createPersonWithLOD(options = {}) {
 }
 
 /**
- * Create crowd person data for instanced rendering (no mesh). Has pos, vel, bounds, bodyColor, facingAngle.
+ * Create crowd person data for instanced rendering (no mesh). Has pos, vel, bounds2D, bodyColor, facingAngle.
  * getPhone() returns null; triggerFlash() is no-op.
  */
 export function createCrowdPerson(options = {}) {
@@ -757,12 +757,12 @@ export function createCrowdPerson(options = {}) {
         maxSpeed: MAX_SPEED * (0.9 + Math.random() * 0.2),
         mesh: null,
         parts: null,
-        bounds: null,
+        bounds2D: null,
         bodyColor,
         getPhone: () => null,
         triggerFlash: () => {},
         _surfaceCache,
-        _lastOctreePos: position ? position.clone() : pos.clone()
+        _lastQuadtreePos: { x: pos.x, z: pos.z }
     };
     return person;
 }

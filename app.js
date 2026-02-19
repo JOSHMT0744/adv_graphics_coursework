@@ -18,6 +18,7 @@ import Stats from 'three/examples/jsm/libs/stats.module'
 import { generateTerrain } from './objects/landscape/farHill.js';
 import { getTexture } from './utils/getTexture.js';
 import { Octree, createOctreeDebugLines } from './utils/Octree.js';
+import { CompositeQuadtree, createQuadtreeDebugLines } from './utils/Quadtree.js';
 import { createDragonfly, getDragonflyGeometry, getDragonflyGeometryLOD, getDragonflyMaterial } from './objects/dragonfly.js';
 import { findPathOctree } from './utils/astar.js';
 import {
@@ -37,21 +38,8 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { SSAOPass } from 'three/examples/jsm/postprocessing/SSAOPass.js';
 import { FXAAShader } from 'three/examples/jsm/shaders/FXAAShader.js';
 
-// ============================================================================
-// Q2a: PARAMETRIC MODELLING - Procedural Durham Environment
-// ============================================================================
-// This scene implements procedural geometry generation (no external 3D assets):
-// - Terrain: Simplex noise with fBm (fractal Brownian motion) in farHill.js
-// - Architectural forms: Parametric arches from ParametricCurve (cathedral-style)
-// - Parametric surfaces: Bezier and B-spline surfaces for grass, walkable surfaces
-// All geometry is mathematically defined using noise functions and parametric curves/surfaces
-// ============================================================================
-
-// Scene setup
 const scene = new THREE.Scene();
-
-// Slight fog (matches night gradient horizon)
-scene.background = new THREE.Color(0x7f3cc2); // scene background for bloom contrast
+scene.background = new THREE.Color(0x7f3cc2);
 scene.fog = new THREE.FogExp2(0x601da3, 0.003);
 // Near plane 0.5 improves depth precision so SSAO correctly occludes (objects behind planes don't show through)
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.5, 1000);
@@ -64,10 +52,9 @@ renderer.setPixelRatio(pixelRatio);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.2;
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.BasicShadowMap; // Faster than PCFSoftShadowMap for 1000+ entities
+renderer.shadowMap.type = THREE.BasicShadowMap;
 document.body.appendChild(renderer.domElement);
 
-// Handle WebGL context loss
 let webglContextLost = false;
 renderer.domElement.addEventListener('webglcontextlost', (event) => {
     event.preventDefault();
@@ -86,29 +73,26 @@ const PARAMS = {
         topColor: 0x1e1e3a,
         bottomColor: 0x0c0c1a
     },
-    // People
     people: {
-        count: 600  // Q3a: Default to 600 to support 1000+ agents with dragonflies (rubric requirement)
+        count: 200
     },
     // Flocking behavior
     flocking: {
-        sep: { on: true, val: 0.5 },
-        ali: { on: true, val: 1.0 },
-        coh: { on: true, val: 1.0 }
+        sep: { on: true, val: 0.2 },
+        ali: { on: true, val: 0.5 },
+        coh: { on: true, val: 0.8 }
     },
-    // Far hill
     farHill: {
         treeCount: 100
     },
     // Lilies
     lilies: {
-        count: 8
+        count: 100
     },
-    // Bloom / Light Festival
     bloom: {
-        strength: 0.55,
-        radius: 0.3,
-        threshold: 0.92
+        strength: 0.08,
+        radius: 0.05,
+        threshold: 0.68
     },
     // Post-processing
     postProcessing: {
@@ -117,7 +101,6 @@ const PARAMS = {
         output: 'Composite',
         exposure: 1.2
     },
-    // Performance
     performance: {
         bloomEnabled: true,
         shadowsEnabled: true,
@@ -129,7 +112,6 @@ const PARAMS = {
         showControlPoints: false,
         wireframe: false
     },
-    // B-spline surface display
     bspline: {
         showHull: false,
         showControlPoints: false,
@@ -137,52 +119,36 @@ const PARAMS = {
     },
     // Dragonflies
     dragonflies: {
-        count: 500,  // Q3a: Default to 500 to support 1000+ agents total (600 people + 500 dragonflies = 1100)
+        count: 600,
         followClick: false,
         maxSpeed: 0.35,
         maxForce: 0.04
+    },
+    boundary: {
+        repellantRange: 2,
+        repellantStrength: 0.2,
+        slowdownRange: 1,
+        speedFactorAtEdge: 0.1
     }
 };
 
-// ============================================================================
-// Q4b: SIGNAL PROCESSING & LIGHT TRANSPORT - Aliasing & Post-Processing
-// ============================================================================
-// Aliasing solution: FXAA (Fast Approximate Anti-Aliasing) for spatial aliasing
-// Post-processing: Bloom (UnrealBloomPass) for Light Festival aesthetic, SSAO for ambient occlusion
-// Bloom creates unified "Light Festival" aesthetic with glow on emissive lights
-// ============================================================================
-// Post-processing: Bloom for Light Festival aesthetic (glow on lights and reflections)
-// SSAO + HDR/Bloom
-
-// Create a render target (no MSAA by default for FPS; use FXAA for antialiasing)
 const size = renderer.getSize(new THREE.Vector2());
 const renderTarget = new THREE.WebGLRenderTarget(size.width, size.height, {
     samples: 0
 });
 const composer = new EffectComposer(renderer, renderTarget);
-
-// Initialise FXAA Pass (keep it disabled by default)
 const fxaaPass = new ShaderPass(FXAAShader);
-// FXAA needs to know pixel size
 fxaaPass.material.uniforms["resolution"].value.x = 1 / (window.innerWidth * window.devicePixelRatio);
 fxaaPass.material.uniforms["resolution"].value.y = 1 / (window.innerHeight * window.devicePixelRatio);
-fxaaPass.enabled = true; // FXAA by default (cheaper than MSAA for 1000+ entities)
+fxaaPass.enabled = true;
 
-// Render Pass (Base scene)
 composer.addPass(new RenderPass(scene, camera));
-
-// SSAO Pass (applied first for depth data, typically before other effects)
 const ssaoPass = new SSAOPass(scene, camera, window.innerWidth, window.innerHeight);
-
-// Tuned settings: smaller kernel for FPS; min/maxDistance keep SSAO local (avoids bleed-through)
 ssaoPass.kernelRadius = 8;
 ssaoPass.minDistance = 0.005;
 ssaoPass.maxDistance = 0.1;
-ssaoPass.enabled = false; // Disabled by default for FPS; enable in GUI if needed
-// Match double-sided surfaces (e.g. grass B-spline): depth/normal pass must render both sides so
-// occluding surfaces write depth and objects behind them (e.g. bridge) don't show through when SSAO is composited
+ssaoPass.enabled = false;
 ssaoPass.normalMaterial.side = THREE.DoubleSide;
-// Don't apply SSAO on fully transparent surfaces: hide them during the SSAO depth/normal pass so they don't write depth
 const _ssaoTransparentCache = [];
 function isFullyTransparent(material) {
     if (!material) return false;
@@ -217,9 +183,7 @@ const bloomPass = new UnrealBloomPass(
     PARAMS.bloom.threshold
 );
 composer.addPass(bloomPass);
-// FXAA works best when it's final or penultimate pass
 composer.addPass(fxaaPass);
-// Output Pass (final pass, no blending)
 composer.addPass(new OutputPass());
 composer.setSize(window.innerWidth, window.innerHeight);
 composer.setPixelRatio(pixelRatio);
@@ -260,7 +224,6 @@ window.addEventListener('keyup', (e) => {
     }
 });
 
-// Dragonfly target: set on click (unproject onto y=5 plane)
 const cursorWorldPos = new THREE.Vector3(0, 5, 0);
 const _dragonflyUnprojA = new THREE.Vector3();
 const _dragonflyUnprojB = new THREE.Vector3();
@@ -274,7 +237,7 @@ window.addEventListener('click', (e) => {
         const t = (5 - _dragonflyUnprojA.y) / dy;
         cursorWorldPos.lerpVectors(_dragonflyUnprojA, _dragonflyUnprojB, t);
         // Invalidate A* paths so dragonflies recompute toward the new click target
-        if (PARAMS.dragonflies.followCursor) {
+        if (PARAMS.dragonflies.followClick) {
             for (let i = 0; i < dragonflies.length; i++) {
                 dragonflies[i].path = [];
                 dragonflies[i].pathIndex = 0;
@@ -307,7 +270,6 @@ function updateCamera() {
     orbitControls.update();
 }
 
-// Water plane (MeshPhong for FPS; envMap set below for simple reflection / light festival aesthetic)
 const plane = new THREE.Mesh(
     new THREE.PlaneGeometry(300, 300),
     new THREE.MeshPhongMaterial({ color: COLOURS.WATER, side: THREE.DoubleSide, shininess: 80, specular: 0x333366 })
@@ -344,12 +306,11 @@ farHill.position.set(0, -55, -135);
 farHill.rotateZ(Math.PI);
 scene.add(farHill);
 
-const nearHill = generateTerrain(300, 50, 32, { endHeight: 55 }); // 32 segments for FPS (was 64)
-nearHill.position.set(0, -55, -65, { endHeight: 55 })
+const nearHill = generateTerrain(300, 50, 32, { endHeight: 55 });
+nearHill.position.set(0, -55, -65);
 scene.add(nearHill);
 
 
-// Far-hill billboard trees
 const FAR_HILL_TREE_BOUNDS = { xMin: -95, xMax: 95, zMin: -155, zMax: -115, yFallback: -55 };
 const FAR_HILL_TREE_WIDTH = 4;
 const FAR_HILL_TREE_HEIGHT = 12;
@@ -370,7 +331,7 @@ const farHillBillboardInstancedMesh = new THREE.InstancedMesh(
     FAR_HILL_TREE_MAX_COUNT
 );
 farHillBillboardInstancedMesh.count = 0;
-farHillBillboardInstancedMesh.frustumCulled = false;  // always draw; billboards are cheap
+farHillBillboardInstancedMesh.frustumCulled = false;
 scene.add(farHillBillboardInstancedMesh);
 
 const farHillRaycaster = new THREE.Raycaster();
@@ -696,7 +657,7 @@ bridgeRailingRight.scale.setScalar(bridgeScale);
 bridgeRailingRight.userData.bridgeRailing = true;
 scene.add(bridgeRailingRight);
 
-// House (Bradley Hall style: two storeys, gable roof, chimney, door, windows)
+// House
 const house = createHouse(40, -5.3, -45, 2.2);
 house.rotateY(Math.PI);
 house.rotateZ(Math.PI / 32);
@@ -713,11 +674,8 @@ house3.rotateZ(Math.PI / 32);
 house3.traverse((o) => { if (o.isMesh) { o.receiveShadow = false; o.castShadow = true; } });
 scene.add(house3);
 
-// Houses along back road
-
-// Staircase from pavement to bridge
-const staircaseStart = new THREE.Vector3(-10, -3.7, -6.8);   // pavement edge center
-const staircaseEnd = new THREE.Vector3(-18, -0.4, -100 + (bridgeDeckLength / 2) * bridgeScale + 15); // bridge level
+const staircaseStart = new THREE.Vector3(-10, -3.7, -6.8);
+const staircaseEnd = new THREE.Vector3(-18, -0.4, -100 + (bridgeDeckLength / 2) * bridgeScale + 15);
 const staircase = createStaircase(staircaseStart, staircaseEnd, {
     width: 6,
     stepHeight: 1.0,
@@ -738,10 +696,9 @@ const connectionSurfacePoints = [
 const connectionSurface = createConnectionSurface(connectionSurfacePoints, { color: 0x666666 });
 scene.add(connectionSurface);
 
-// Fence from bridge right railing to SU left (curved)
 const fenceControlPoints = [
-    connectionSurfacePoints[5].clone(),   // bridge right (-16, 0.8, -40)
-    connectionSurfacePoints[0].clone()   // SU left (-4.25, 0, -37.75)
+    connectionSurfacePoints[5].clone(),
+    connectionSurfacePoints[0].clone()
 ];
 const fence = createFence(fenceControlPoints, { railingHeight: 2 });
 fence.traverse((o) => { if (o.isMesh) { o.receiveShadow = false; o.castShadow = true; } });
@@ -750,7 +707,6 @@ fence.updateMatrixWorld(true);
 // Note: boundingBox will be set by the environmentObjects loop below (line ~962)
 fence.userData.isBoundaryObstacle = true;
 
-// Path from connection surface (edge 3-4: staircase left to bridge left) to road at y>7 (so path does not cross staircase)
 const PATH_WIDTH = 10;
 const pathConnectionA = connectionSurfacePoints[4]; // bridge left (-24, 0.8, -40)
 const pathConnectionB = connectionSurfacePoints[3]; // staircase left (-20.75, -0.4, -23.79)
@@ -765,7 +721,6 @@ for (let i = 0; i <= 100; i++) {
         break;
     }
 }
-// u_center in [0, uMax] closest to path midpoint in xz
 let uCenter = 0;
 let bestDistSq = Infinity;
 for (let i = 0; i <= 100; i++) {
@@ -813,10 +768,8 @@ const pathFence = createFence(pathFenceControlPoints, { railingHeight: 2 });
 pathFence.traverse((o) => { if (o.isMesh) { o.receiveShadow = false; o.castShadow = true; } });
 scene.add(pathFence);
 pathFence.updateMatrixWorld(true);
-// Note: boundingBox will be set by the environmentObjects loop below (line ~962)
 pathFence.userData.isBoundaryObstacle = true;
 
-// Oak tree in front of SU entrance
 const treeElement = createOakTree(0, 0);
 treeElement.traverse((o) => { if (o.isMesh) o.castShadow = true; });
 treeElement.position.set(-28, 1, -12);
@@ -840,18 +793,17 @@ tree3.position.set(treePlacePos.x, treePlacePos.y, treePlacePos.z);
 scene.add(tree3);
 
 const environmentObjects = [
-    treeElement, tree2, tree3, dunelm,
-    house, house2, house3, bridgeRailingLeft, bridgeRailingRight
+    tree2, tree3, dunelm,
+    house, house2, house3
 ];
 
-// Lily structures (Elysium Garden style) — instanced stems + petals (2 draw calls instead of 80)
 const LUMINOUS_PETAL_COLORS = [
     0xff44aa, 0x00ddcc, 0xffaa44, 0xaa44ff, 0x44ffaa, 0xff6644, 0x4488ff, 0xffcc00
 ];
 function randomLuminousPetalColor() {
     return LUMINOUS_PETAL_COLORS[Math.floor(Math.random() * LUMINOUS_PETAL_COLORS.length)];
 }
-const LILY_MAX_COUNT = 40;
+const LILY_MAX_COUNT = 100;
 const PETALS_PER_LILY = PETAL_LAYOUT.length; // 9
 const lilyContainer = new THREE.Group();
 scene.add(lilyContainer);
@@ -860,7 +812,7 @@ const lilyStemGeometry = getSharedStemGeometry();
 const lilyStemMaterial = new THREE.MeshStandardMaterial({
     color: new THREE.Color(0x22aa88),
     emissive: new THREE.Color(0x22aa88),
-    emissiveIntensity: 0.7,
+    emissiveIntensity: 0.8,
     side: THREE.DoubleSide
 });
 const lilyStemInstancedMesh = new THREE.InstancedMesh(lilyStemGeometry, lilyStemMaterial, LILY_MAX_COUNT);
@@ -931,7 +883,6 @@ function updateLilies() {
         }
         lilies.push({ x, y, z, stemHeight, petalColor });
     }
-    // Precompute lily avoidance bounds (XZ extent + LILY_AVOID_RADIUS) for fast "person near lilies" check
     if (lilies.length > 0) {
         let lxMin = Infinity, lxMax = -Infinity, lzMin = Infinity, lzMax = -Infinity;
         for (let i = 0; i < lilies.length; i++) {
@@ -954,11 +905,7 @@ function updateLilies() {
 }
 updateLilies();
 
-// Disable matrix auto-update on static objects so Three.js skips recursive updateMatrixWorld (Lecture 1: dirty flags).
 scene.updateMatrixWorld(true);
-
-// Precompute bounding boxes for dragonfly environment obstacle avoidance (Box3 + clampPoint at runtime)
-// Q2b/Q3a: All environment objects must have boundingBox for collision avoidance
 const _envBoxTemp = new THREE.Box3();
 const _envBoxWorldPos = new THREE.Vector3();
 const ENV_BOX_MARGIN = 0.5;
@@ -973,7 +920,7 @@ const BRIDGE_RAILING_BOX_MARGIN = 0.15;  // tighter for bridge railings so they 
  */
 function computeTightBoundingBox(obj) {
     if (!obj) return null;
-    
+
     // For bridge railings (Groups with single mesh), compute from the actual mesh geometry
     if (obj.userData.bridgeRailing && obj.isGroup) {
         // Find the actual mesh inside the group
@@ -983,14 +930,14 @@ function computeTightBoundingBox(obj) {
                 mesh = child;
             }
         });
-        
+
         if (mesh) {
             // Ensure mesh geometry has bounding box computed
             if (!mesh.geometry.boundingBox) {
                 mesh.geometry.computeBoundingBox();
             }
             const localBox = mesh.geometry.boundingBox.clone();
-            
+
             // Get the 8 corners of the mesh's local bounding box
             const corners = [
                 new THREE.Vector3(localBox.min.x, localBox.min.y, localBox.min.z),
@@ -1002,11 +949,11 @@ function computeTightBoundingBox(obj) {
                 new THREE.Vector3(localBox.min.x, localBox.max.y, localBox.max.z),
                 new THREE.Vector3(localBox.max.x, localBox.max.y, localBox.max.z),
             ];
-            
+
             // Ensure world matrices are up to date
             obj.updateMatrixWorld(true);
             mesh.updateMatrixWorld(true);
-            
+
             // Transform each corner from mesh local space to world space
             // mesh.localToWorld() handles both mesh and parent group transforms
             const worldBox = new THREE.Box3();
@@ -1016,11 +963,11 @@ function computeTightBoundingBox(obj) {
                 mesh.localToWorld(worldCorner);
                 worldBox.expandByPoint(worldCorner);
             }
-            
+
             return worldBox;
         }
     }
-    
+
     // For other objects, use standard setFromObject
     obj.updateMatrixWorld(true);
     _envBoxTemp.setFromObject(obj);
@@ -1033,39 +980,24 @@ for (let i = 0; i < environmentObjects.length; i++) {
         console.warn(`environmentObjects[${i}] is null/undefined`);
         continue;
     }
-    
+
     // Compute tight bounding box (especially important for bridge railings)
     const tightBox = computeTightBoundingBox(obj);
     if (!tightBox) {
         console.warn(`Failed to compute bounding box for environmentObjects[${i}]`, obj);
         continue;
     }
-    
+
     const margin = obj.userData.isBoundaryObstacle ? FENCE_BOX_MARGIN
         : (obj.userData.bridgeRailing ? BRIDGE_RAILING_BOX_MARGIN : ENV_BOX_MARGIN);
     tightBox.expandByScalar(margin);
     obj.userData.boundingBox = tightBox;
-    
-    // Verify boundingBox was set correctly
+
     if (!obj.userData.boundingBox || !obj.userData.boundingBox.isBox3) {
         console.error(`Failed to set boundingBox for environmentObjects[${i}]`, obj);
     }
 }
 
-// Post-validation: Ensure all environmentObjects have boundingBox set
-// Q2b/Q3a: This is critical for obstacle repulsion to work correctly
-for (let i = 0; i < environmentObjects.length; i++) {
-    const obj = environmentObjects[i];
-    if (!obj) {
-        console.error(`environmentObjects[${i}] is null/undefined`);
-        continue;
-    }
-    if (!obj.userData.boundingBox) {
-        console.error(`environmentObjects[${i}] missing boundingBox:`, obj);
-    } else if (!obj.userData.boundingBox.isBox3) {
-        console.error(`environmentObjects[${i}] boundingBox is not a Box3:`, obj.userData.boundingBox);
-    }
-}
 function disableMatrixAutoUpdateForStatic(...objects) {
     for (const obj of objects) {
         if (!obj) continue;
@@ -1081,24 +1013,13 @@ disableMatrixAutoUpdateForStatic(
 );
 if (dunelm.userData.doorGroup) dunelm.userData.doorGroup.matrixAutoUpdate = true;
 
-// --- Instanced characters with octree, frustum culling, walkable placement ---
+// --- Instanced characters with quadtree (people), octree (dragonflies), frustum culling, walkable placement ---
 const WALKABLE_WORLD_BOUNDS = new THREE.Box3(
     new THREE.Vector3(-75, -25, -165),
     new THREE.Vector3(90, 12, 15)
 );
-// ============================================================================
-// Q2b: SPATIAL DISCRETISATION - Octree for Collision & Query Optimisation
-// ============================================================================
-// Octree spatial partitioning data structure subdivides world space for efficient
-// queries. Used for frustum culling, flocking neighbour queries, and A* pathfinding.
-// Debug view available via GUI: Debug > Octree (visualises leaf cell bounds)
-// See utils/Octree.js for implementation and utils/walkableSampler.js for height-field grid
-// ============================================================================
-const octree = new Octree(WALKABLE_WORLD_BOUNDS, { maxDepth: 5, minSize: 2 });
+const peopleQuadtree = new CompositeQuadtree({ maxDepth: 5, minSize: 2 });
 const MAX_PLACEMENT_RETRIES = 20;
-const BOUNDARY_SOFT_MARGIN = 3; // WHen within this distance of walkable boundary, gradual force encourages turning away
-const BOUNDARY_PUSH_INWARD = 1; // steer toward a point this far past nearest, to escape sliding along the edge
-const PERSON_BOUNDARY_MARGIN = 2; // steer/placement: keep people this far from world bounds (avoids stuck outside collision avoidance)
 
 const BRIDGE_DECK_REGION_INDEX = 5; // walkableRegions[5] = bridge deck; excluded from initial placement
 const walkableRegions = [
@@ -1107,7 +1028,6 @@ const walkableRegions = [
     createBezierSampler(roadControlPoints),
     createBSplineSampler(bsplineSurfaceGrass1, bsplineControlPointsGrass1),
     createBSplineSampler(bsplineSurfaceGrass2, bsplineControlPointsGrass2),
-    // Narrow walkable bounds to keep people away from railings: subtract railing width + safety margin on each side
     createBridgeDeckSampler(-20, 0.8, -100, bridgeScale, bridgeDeckLength, bridgeW - 2 * (bridgeRailingWidth + BRIDGE_WALKABLE_RAILING_MARGIN)),
     createConnectionSampler(connectionSurfacePoints),
     createQuadSampler(pathQuadPoints),
@@ -1138,51 +1058,39 @@ const walkableSampler = createCombinedSampler(walkableRegions, {
     yCeiling: 50
 });
 
-// Sampled pos is the surface (plane) where feet should stand. We add getFeetSurfaceYOffset() so the
-// mesh origin (which sits above the feet in bind pose) is placed above the surface and feet touch the plane.
-const CHARACTER_HEIGHT = 3.65; // feet to top of head for bounds
-const PERSON_RADIUS = 0.5; // for bounds and placement
-const LILY_AVOID_RADIUS = 1; // avoid placing and walking through lilies (same manner as Dunelm)
+const PERSON_RADIUS = 0.5;
+const LILY_AVOID_RADIUS = 1;
 const FEET_SURFACE_Y_OFFSET = Figure.getFeetSurfaceYOffset();
-const FLOCK_RADIUS = 10; // max distance for separation/alignment/cohesion (tighter for visible group behaviour)
-const FLOCK_MAX_NEIGHBORS = 20; // cap neighbor count to bound flocking cost
-
-// peopleParams moved to PARAMS.people
-const ENABLE_PROFILING = false; // set true to log crowd/bucket/composer ms and draw calls once per second
+const FLOCK_RADIUS = 10;
+const FLOCK_MAX_NEIGHBORS = 20;
+const ENABLE_PROFILING = false;
 let _profileLastLog = 0;
 let _profileCrowdMs = 0;
 let _profileBucketMs = 0;
 const _dummyMatrix = new THREE.Matrix4();
-const _flockBox = new THREE.Box3();
-const _flockBoxSize = new THREE.Vector3(FLOCK_RADIUS * 2, FLOCK_RADIUS * 2, FLOCK_RADIUS * 2);
-const _flockNeighbors = []; // reused for octree.queryBounds in applyPhysics
-const _flockSeenIds = new Set(); // dedupe octree results in applyPhysics
+const _flockBox2D = { minX: 0, maxX: 0, minZ: 0, maxZ: 0 }; // 2D box for peopleQuadtree.queryBounds
+const _flockNeighbors = []; // reused for peopleQuadtree.queryBounds in applyPhysics
+const _flockSeenIds = new Set(); // dedupe quadtree results in applyPhysics
 const _dummyPosition = new THREE.Vector3();
 const _dummyQuaternion = new THREE.Quaternion();
 const _dummyScale = new THREE.Vector3(1, 1, 1);
 const _lilyWorldPos = new THREE.Vector3();
 
-// Reusable temporaries for applyPhysics (avoid per-frame allocations)
 const _physicsForce = new THREE.Vector3();
 const _physicsSep = new THREE.Vector3();
 const _physicsAli = new THREE.Vector3();
 const _physicsCoh = new THREE.Vector3();
 const _physicsPush = new THREE.Vector3();
 const _physicsDestination = new THREE.Vector3();
-const _physicsCandidatePos = new THREE.Vector3();
 const _physicsAvoid = new THREE.Vector3();
 const _physicsClampResult = new THREE.Vector3();
 const _physicsWanderVec = new THREE.Vector3();
-const _physicsBoundarySteer = new THREE.Vector3();
 const _physicsClampedPoint = new THREE.Vector3();
-const _physicsRay = new THREE.Ray();
-const _physicsRayHit = new THREE.Vector3();
-const _physicsAlongBridge = new THREE.Vector3();
+const _envClampPoint = new THREE.Vector3();
+const _envClampNormal = new THREE.Vector3();
 const _animatePersonQuat = new THREE.Quaternion();
 const _animatePersonAxisY = new THREE.Vector3(0, 1, 0);
-const _smoothedVelTemp = new THREE.Vector3();
 
-// Dragonfly physics temporaries
 const _dfDesired = new THREE.Vector3();
 const _dfSteer = new THREE.Vector3();
 const _dfSep = new THREE.Vector3();
@@ -1206,7 +1114,6 @@ instancedMeshMedium.geometry.setAttribute('instanceColor', new THREE.InstancedBu
 instancedMeshMedium.castShadow = false;
 scene.add(instancedMeshMedium);
 
-// Dragonfly instanced meshes (close = body+wings, far = cube LOD)
 const DRAGONFLY_MAX = 1000;
 const dfInstancedClose = new THREE.InstancedMesh(getDragonflyGeometry(), getDragonflyMaterial(), DRAGONFLY_MAX);
 dfInstancedClose.count = 0;
@@ -1313,22 +1220,23 @@ let cameraFrustum = new THREE.Frustum();
 let frustumMatrix = new THREE.Matrix4();
 
 let frameCount = 0;
-let octreeDebugLine = null;
+let peopleQuadtreeDebugLine = null;
 let dragonflyOctreeDebugLine = null;
-const animationClock = new THREE.Clock();
 
-
-function updateOctreeDebugLine() {
-    if (octreeDebugLine) {
-        scene.remove(octreeDebugLine);
-        octreeDebugLine.geometry.dispose();
-        octreeDebugLine.material.dispose();
-        octreeDebugLine = null;
+function updatePeopleQuadtreeDebugLine() {
+    if (peopleQuadtreeDebugLine) {
+        scene.remove(peopleQuadtreeDebugLine);
+        peopleQuadtreeDebugLine.geometry.dispose();
+        peopleQuadtreeDebugLine.material.dispose();
+        peopleQuadtreeDebugLine = null;
     }
-    const cells = octree.getCells();
-    const boxes = cells.length > 0 ? cells : [octree.worldBounds.clone()];
-    octreeDebugLine = createOctreeDebugLines(boxes);
-    if (octreeDebugLine) scene.add(octreeDebugLine);
+    const cells = peopleQuadtree.getCells();
+    const boxes2D = cells.length > 0 ? cells : [
+        { minX: -23.94, maxX: 78.6, minZ: -40.2, maxZ: 12.2 },
+        { minX: -23.94, maxX: -16.12, minZ: -159, maxZ: -40.2 }
+    ];
+    peopleQuadtreeDebugLine = createQuadtreeDebugLines(boxes2D, { color: 0x00ff88 });
+    if (peopleQuadtreeDebugLine) scene.add(peopleQuadtreeDebugLine);
 }
 
 function updateDragonflyOctreeDebugLine() {
@@ -1344,7 +1252,6 @@ function updateDragonflyOctreeDebugLine() {
     if (dragonflyOctreeDebugLine) scene.add(dragonflyOctreeDebugLine);
 }
 
-// Night lighting — Lumiere-style: readable night with moon + ambient + hemisphere + festival accents
 const ambientLight = new THREE.AmbientLight(0x2a2a50, 1.25);
 scene.add(ambientLight);
 ambientLight.matrixAutoUpdate = false;
@@ -1379,7 +1286,6 @@ festivalLightCool.position.set(30, 12, -75);
 scene.add(festivalLightCool);
 festivalLightCool.matrixAutoUpdate = false;
 
-// Position the camera
 camera.position.set(5, 5, 5);
 camera.lookAt(0, 0, 0);
 camera.layers.enable(1); // see window meshes (layer 1)
@@ -1388,12 +1294,10 @@ camera.layers.enable(1); // see window meshes (layer 1)
 const stats = Stats();
 document.body.appendChild(stats.dom);
 
-// Axis helper
 const axesHelper = new THREE.AxesHelper(5);
 scene.add(axesHelper);
 axesHelper.matrixAutoUpdate = false;
 
-// Creating a GUI with options
 const gui = new GUI({ name: "Lumiere GUI" });
 const cameraFolder = gui.addFolder("Camera");
 cameraFolder.add(camera.position, "z", 0, 10);
@@ -1469,7 +1373,7 @@ dragonflyFolder.add(PARAMS.dragonflies, "maxForce", 0.01, 0.1, 0.005).name("Max 
 dragonflyFolder.open();
 
 const lightFestivalFolder = gui.addFolder("Light Festival");
-lightFestivalFolder.add(PARAMS.bloom, "strength", 0, 2).name("Bloom strength").onChange((v) => { bloomPass.strength = v; PARAMS.bloom.strength = v; });
+lightFestivalFolder.add(PARAMS.bloom, "strength", 0, 0.2, 0.005).name("Bloom strength").onChange((v) => { bloomPass.strength = v; PARAMS.bloom.strength = v; });
 lightFestivalFolder.add(PARAMS.bloom, "radius", 0, 1).name("Bloom radius").onChange((v) => { bloomPass.radius = v; PARAMS.bloom.radius = v; });
 lightFestivalFolder.add(PARAMS.bloom, "threshold", 0, 1).name("Bloom threshold").onChange((v) => { bloomPass.threshold = v; PARAMS.bloom.threshold = v; });
 lightFestivalFolder.open();
@@ -1513,12 +1417,11 @@ f_hdr.add(PARAMS.postProcessing, 'exposure', 0.1, 2.0).name('Exposure').onChange
     renderer.toneMappingExposure = v;
     PARAMS.postProcessing.exposure = v;
 });
-// Use PARAMS.bloom as single source of truth so Light Festival and HDR/Bloom stay in sync
 f_hdr.add(PARAMS.bloom, 'threshold', 0.0, 1.0).name('Threshold').onChange(v => {
     bloomPass.threshold = v;
     PARAMS.bloom.threshold = v;
 });
-f_hdr.add(PARAMS.bloom, 'strength', 0.0, 3.0).name('Strength').onChange(v => {
+f_hdr.add(PARAMS.bloom, 'strength', 0, 0.2, 0.005).name('Strength').onChange(v => {
     bloomPass.strength = v;
     PARAMS.bloom.strength = v;
 });
@@ -1527,18 +1430,11 @@ f_hdr.add(PARAMS.bloom, 'radius', 0.0, 1.0).name('Radius').onChange(v => {
     PARAMS.bloom.radius = v;
 });
 
-// Performance / High-FPS toggles
 const perfFolder = gui.addFolder('Performance');
 perfFolder.add(PARAMS.performance, 'bloomEnabled').name('Bloom').onChange(v => {
     bloomPass.enabled = v;
     PARAMS.performance.bloomEnabled = v;
 });
-perfFolder.add(PARAMS.performance, 'shadowsEnabled').name('Shadows').onChange(v => {
-    renderer.shadowMap.enabled = v;
-    directionalLight.castShadow = v;
-    PARAMS.performance.shadowsEnabled = v;
-});
-perfFolder.add(PARAMS.performance, 'usePostProcessing').name('Post-processing (Bloom/FXAA)').onChange(() => { });
 
 const bezierFolder = gui.addFolder("Bezier surface");
 bezierFolder.add(PARAMS.bezier, "showHull").name("Show control hull").onChange((v) => {
@@ -1560,17 +1456,7 @@ bezierFolder.add(PARAMS.bezier, "wireframe").name("Wireframe overlay").onChange(
     if (nearPavementSurface.userData.bezier?.wireframe) nearPavementSurface.userData.bezier.wireframe.visible = v;
 });
 
-// ============================================================================
-// Q2b: DEBUG VIEWS - Spatial Partitioning Visualization
-// ============================================================================
-// Debug views for spatial data structures:
-// - Octree: tree-based spatial partitioning (green lines)
-// - Walkable Grid: height-field grid for O(1) surface lookup (blue lines)
-// - Environment Bounding Boxes: collision avoidance margins for obstacles (red lines)
-// Both demonstrate how world space is subdivided for collision and query optimization
-// ============================================================================
-// Debug: Octree visualisation
-const debugParams = { octree: false, dragonflyOctree: false, walkableGrid: false, environmentBoundingBoxes: false, logPersonMovement: false, debugPersonIndex: 0 };
+const debugParams = { peopleQuadtree: false, dragonflyOctree: false, walkableGrid: false, environmentBoundingBoxes: false, logPersonMovement: false, debugPersonIndex: 0 };
 let walkableGridDebugLine = null;
 let environmentBoundingBoxDebugLine = null;
 
@@ -1602,22 +1488,21 @@ function updateEnvironmentBoundingBoxDebugLine() {
         }
     }
     if (boxes.length > 0) {
-        // Use red color to distinguish from other debug views
         environmentBoundingBoxDebugLine = createOctreeDebugLines(boxes, { color: 0xff0000 });
         if (environmentBoundingBoxDebugLine) scene.add(environmentBoundingBoxDebugLine);
     }
 }
 
 const debugFolder = gui.addFolder("Debug");
-debugFolder.add(debugParams, "octree").name("Octree").onChange((v) => {
+debugFolder.add(debugParams, "peopleQuadtree").name("People Quadtree").onChange((v) => {
     if (v) {
-        updateOctreeDebugLine();
+        updatePeopleQuadtreeDebugLine();
     } else {
-        if (octreeDebugLine) {
-            scene.remove(octreeDebugLine);
-            octreeDebugLine.geometry.dispose();
-            octreeDebugLine.material.dispose();
-            octreeDebugLine = null;
+        if (peopleQuadtreeDebugLine) {
+            scene.remove(peopleQuadtreeDebugLine);
+            peopleQuadtreeDebugLine.geometry.dispose();
+            peopleQuadtreeDebugLine.material.dispose();
+            peopleQuadtreeDebugLine = null;
         }
     }
 });
@@ -1683,7 +1568,6 @@ function updateCrowdCount() {
 const debugPersonIndexController = debugFolder.add(debugParams, "debugPersonIndex", 0, Math.max(0, PARAMS.people.count - 1)).step(1).name("Debug Person Index").onChange((v) => {
     console.log(`Debug logging will target person index ${Math.floor(v)}`);
 });
-// Store reference globally so updateCrowdCount can access it
 if (typeof window !== 'undefined') {
     window.debugPersonIndexController = debugPersonIndexController;
 }
@@ -1693,41 +1577,40 @@ function modifyCrowd(n) {
         for (let i = 0; i < n; i++) {
             let placed = false;
             for (let retry = 0; retry < MAX_PLACEMENT_RETRIES && !placed; retry++) {
-                const sampleResult = walkableSampler.sampleRandom();
-                const pos = sampleResult instanceof THREE.Vector3 ? sampleResult : sampleResult.pos;
-                const insideWalkable = walkableSampler.getSurfaceInfo(pos.x, pos.z).inside;
-                if (!insideWalkable) continue;
-
-                /*
-                for (const obj of environmentObjects) {
-                    const box = obj.userData?.boundingBox;
-                    if (box && box.containsPoint(pos)) {
-                        insideObstacle = true;
+                const { x, z } = peopleQuadtree.sampleRandomPoint();
+                const bounds2D = {
+                    minX: x - PERSON_RADIUS,
+                    maxX: x + PERSON_RADIUS,
+                    minZ: z - PERSON_RADIUS,
+                    maxZ: z + PERSON_RADIUS
+                };
+                const existing = peopleQuadtree.queryBounds(bounds2D);
+                if (existing.length > 0) continue;
+                // Reject placement if person footprint would overlap any environment object
+                let overlapsEnv = false;
+                for (let e = 0; e < environmentObjects.length; e++) {
+                    const box = environmentObjects[e].userData.boundingBox;
+                    if (box && bounds2DOverlapsEnvBox(bounds2D, box)) {
+                        overlapsEnv = true;
                         break;
                     }
                 }
-                if (insideObstacle) continue;
-                */
-                const bounds = new THREE.Box3(
-                    new THREE.Vector3(pos.x - PERSON_RADIUS, pos.y, pos.z - PERSON_RADIUS),
-                    new THREE.Vector3(pos.x + PERSON_RADIUS, pos.y + CHARACTER_HEIGHT, pos.z + PERSON_RADIUS)
-                );
-
-                const existing = octree.queryBounds(bounds);
-                if (existing.length === 0) {
-                    const position = new THREE.Vector3(pos.x, pos.y + FEET_SURFACE_Y_OFFSET / 2, pos.z);
-                    const surfaceOpts = (sampleResult && typeof sampleResult === 'object' && !(sampleResult instanceof THREE.Vector3) && 'surfaceType' in sampleResult)
-                        ? { u: sampleResult.u, v: sampleResult.v, surfaceType: sampleResult.surfaceType, regionIndex: sampleResult.regionIndex }
-                        : {};
-                    const person = createCrowdPerson({ position, rotationY: Math.random() * Math.PI * 2, ...surfaceOpts });
-                    person.bounds = bounds;
-                    person.id = people.length;
-                    person.facingAngle = person.rotationY;
-                    person._lastOctreePos = person.pos.clone();
-                    octree.insert(person);
-                    people.push(person);
-                    placed = true;
-                }
+                if (overlapsEnv) continue;
+                const surfaceInfo = walkableSampler.getSurfaceInfo(x, z);
+                if (!surfaceInfo.inside) continue;
+                const y = surfaceInfo.y != null ? surfaceInfo.y : 0;
+                const position = new THREE.Vector3(x, y + FEET_SURFACE_Y_OFFSET / 2, z);
+                const surfaceOpts = (surfaceInfo.surfaceType != null && surfaceInfo.regionIndex != null)
+                    ? { u: surfaceInfo.u, v: surfaceInfo.v, surfaceType: surfaceInfo.surfaceType, regionIndex: surfaceInfo.regionIndex }
+                    : {};
+                const person = createCrowdPerson({ position, rotationY: Math.random() * Math.PI * 2, ...surfaceOpts });
+                person.bounds2D = bounds2D;
+                person.id = people.length;
+                person.facingAngle = person.rotationY;
+                person._lastQuadtreePos = { x: person.pos.x, z: person.pos.z };
+                peopleQuadtree.insert(person);
+                people.push(person);
+                placed = true;
             }
         }
         updateCrowdCount();
@@ -1740,24 +1623,24 @@ function modifyCrowd(n) {
             p.mesh = null;
             p.parts = null;
         }
-        octree.clear();
-        for (const p of people) octree.insert(p);
-        if (octreeDebugLine) updateOctreeDebugLine();
+        peopleQuadtree.clear();
+        for (const p of people) {
+            p.bounds2D = {
+                minX: p.pos.x - PERSON_RADIUS,
+                maxX: p.pos.x + PERSON_RADIUS,
+                minZ: p.pos.z - PERSON_RADIUS,
+                maxZ: p.pos.z + PERSON_RADIUS
+            };
+            peopleQuadtree.insert(p);
+        }
+        if (peopleQuadtreeDebugLine) updatePeopleQuadtreeDebugLine();
     }
 }
 
-// PARAMS moved to unified PARAMS object at top of GUI section
 const MAX_FORCE = 0.03;
 const MAX_SPEED = 0.25;
-const SURFACE_SAMPLE_EVERY = 2;        // call getSurfaceInfo at most every N frames per agent (close)
-const SURFACE_SAMPLE_EVERY_FAR = 8;    // distant agents: sample less often (LOD); 8 balances correctness vs cost
-const SURFACE_SAMPLE_DISTANCE = 0.35;  // re-sample when moved this far in XZ (catch surface transitions sooner)
-const SURFACE_LOD_DISTANCE = 50;       // beyond this distance from camera, use SURFACE_SAMPLE_EVERY_FAR
-const PERSON_BOUNDARY_STRENGTH = 0.02; // steering force magnitude (match dragonfly)
 
 // Natural movement constants
-const WANDER_CHANGE_INTERVAL_MIN = 20;  // frames before wander direction can change (min)
-const WANDER_CHANGE_INTERVAL_MAX = 100; // frames before wander direction can change (max)
 const MAX_TURN_RAD = 0.08;              // max radians per frame for facing angle change
 const SMOOTH_VEL_LERP = 0.15;           // lerp factor for velocity smoothing (0=no smooth, 1=instant)
 const WALK_PHASE_PER_UNIT = 3.5;        // radians per unit of displacement for walk cycle
@@ -1765,15 +1648,11 @@ const MAX_FORCE_CLAMP_FACTOR = 2;       // clamp accumulated force to MAX_FORCE 
 
 // Bridge movement constants
 const BRIDGE_CENTER_X = -20;            // bridge center X position (matches bridge.position.x)
-const BRIDGE_ALONG_FLOW_STRENGTH = 0.015; // force strength for along-bridge flow (parallel to railings)
 // Bridge endpoints: near end (staircase side) and far end (opposite side)
-const BRIDGE_NEAR_Z = -100 + (bridgeDeckLength / 2) * bridgeScale;  // z = -40
 const BRIDGE_FAR_Z = -100 - (bridgeDeckLength / 2) * bridgeScale;  // z = -160
 const BRIDGE_DECK_Y = 0.8;  // bridge deck top surface Y
 const BRIDGE_FAR_TARGET = new THREE.Vector3(BRIDGE_CENTER_X, BRIDGE_DECK_Y, BRIDGE_FAR_Z);
-const BRIDGE_TARGET_REACHED_DISTANCE = 3;  // distance threshold to consider bridge target reached
 
-/** Nearest point on box surface. When point is inside, returns projection onto closest face; when outside, same as box.clampPoint. */
 function getClosestPointOnBoxSurface(box, point, target) {
     if (!box.containsPoint(point)) return box.clampPoint(point, target);
     const dxMin = point.x - box.min.x, dxMax = box.max.x - point.x;
@@ -1792,6 +1671,31 @@ function getClosestPointOnBoxSurface(box, point, target) {
     return target;
 }
 
+/** Like getClosestPointOnBoxSurface but also writes the outward unit normal of the chosen face to targetNormal. */
+function getClosestPointOnBoxSurfaceWithNormal(box, point, targetPoint, targetNormal) {
+    getClosestPointOnBoxSurface(box, point, targetPoint);
+    if (!box.containsPoint(point)) {
+        targetNormal.subVectors(point, targetPoint).normalize();
+        return targetPoint;
+    }
+    const dxMin = point.x - box.min.x, dxMax = box.max.x - point.x;
+    const dyMin = point.y - box.min.y, dyMax = box.max.y - point.y;
+    const dzMin = point.z - box.min.z, dzMax = box.max.z - point.z;
+    const minD = Math.min(dxMin, dxMax, dyMin, dyMax, dzMin, dzMax);
+    if (minD === dxMin) targetNormal.set(-1, 0, 0);
+    else if (minD === dxMax) targetNormal.set(1, 0, 0);
+    else if (minD === dyMin) targetNormal.set(0, -1, 0);
+    else if (minD === dyMax) targetNormal.set(0, 1, 0);
+    else if (minD === dzMin) targetNormal.set(0, 0, -1);
+    else targetNormal.set(0, 0, 1);
+    return targetPoint;
+}
+
+function bounds2DOverlapsEnvBox(bounds2D, box) {
+    return box.min.x <= bounds2D.maxX && box.max.x >= bounds2D.minX &&
+        box.min.z <= bounds2D.maxZ && box.max.z >= bounds2D.minZ;
+}
+
 function applyPhysics(person) {
     if (!person || !person.pos) return person;
     if (person.state === 'SNAPPING') {
@@ -1806,18 +1710,18 @@ function applyPhysics(person) {
     let count = 0;
 
     if (person.state !== 'SNAPPING') {
-        // ========================================================================
         // Q3a: CROWD INTELLIGENCE - Flocking, Queuing, Flow Fields, Collision Avoidance
+        // Reynolds-style flocking: separation, alignment, cohesion with quadtree-based
+        // neighbour queries. Also implements queuing (QUEUING state),
+        // collision avoidance with environment.
         // ========================================================================
-        // Reynolds-style flocking: separation, alignment, cohesion with octree-based
-        // neighbour queries (O(n*k) not O(n^2)). Also implements queuing (QUEUING state),
-        // flow fields (bridge flow along Z), and collision avoidance with environment.
-        // Supports 1000+ autonomous agents (people + dragonflies) as per rubric requirement.
-        // ========================================================================
-        
-        // FLOCKING ALGORITHM (spatial: use octree so O(n*k) not O(n^2))
-        _flockBox.setFromCenterAndSize(person.pos, _flockBoxSize);
-        octree.queryBounds(_flockBox, _flockNeighbors);
+
+        // FLOCKING ALGORITHM (spatial: use quadtree so O(n*k) not O(n^2); 2D XZ only)
+        _flockBox2D.minX = person.pos.x - FLOCK_RADIUS;
+        _flockBox2D.maxX = person.pos.x + FLOCK_RADIUS;
+        _flockBox2D.minZ = person.pos.z - FLOCK_RADIUS;
+        _flockBox2D.maxZ = person.pos.z + FLOCK_RADIUS;
+        peopleQuadtree.queryBounds(_flockBox2D, _flockNeighbors);
         _flockSeenIds.clear();
         for (let k = 0; k < _flockNeighbors.length; k++) {
             const other = _flockNeighbors[k];
@@ -1849,14 +1753,6 @@ function applyPhysics(person) {
             }
         }
 
-        // avoid dunelm building (static objects)
-        /*
-        const distDunelm = person.pos.distanceTo(dunelm.position);
-        if (distDunelm < dunelm.userData.radius) {
-            _physicsAvoid.subVectors(person.pos, dunelm.position).normalize().multiplyScalar((dunelm.userData.radius - distDunelm) * 0.5);
-            _physicsForce.add(_physicsAvoid);
-        }*/
-
         // avoid lilies (only when person is near lily region to save compute)
         if (lilyAvoidBounds && lilyAvoidBounds.containsPoint(person.pos)) {
             for (let L = 0; L < lilies.length; L++) {
@@ -1867,102 +1763,70 @@ function applyPhysics(person) {
                     _physicsForce.add(_physicsAvoid);
                 }
             }
-        }*/
+        }
 
-        // Avoid environment obstacles (precomputed Box3 per object); push out when inside
-        /*
-        const PERSON_ENV_AVOID_MARGIN = 0.5;
-        const PERSON_ENV_AVOID_STRENGTH = 0.5;
-        const PERSON_ENV_INSIDE_STRENGTH = 0.2;
-        const onBridge = person._surfaceCache && person._surfaceCache.regionIndex === BRIDGE_DECK_REGION_INDEX;
+        const PERSON_ENV_INSIDE_STRENGTH = 0.8;
+        _physicsAvoid.set(0, 0, 0);
         for (let i = 0; i < environmentObjects.length; i++) {
             const obj = environmentObjects[i];
             const box = obj.userData.boundingBox;
             if (!box) continue;
-            const margin = obj.userData.isBoundaryObstacle ? BOUNDARY_OBSTACLE_MARGIN : PERSON_ENV_AVOID_MARGIN;
-            const strength = obj.userData.isBoundaryObstacle ? PERSON_BOUNDARY_STRENGTH * 6 : PERSON_ENV_AVOID_STRENGTH;
-            if (box.containsPoint(person.pos)) {
-                // Q3b: Compression on impact - trigger when inside obstacle
-                if (person._compressionTimer === undefined || person._compressionTimer >= COMPRESSION_DURATION) {
-                    person._compressionTimer = 0;
-                    person._compressionMax = 0.15;  // Moderate compression for obstacle collision
-                }
-                // Custom push for bridge railings when on bridge: push toward deck center (perpendicular to railings)
-                if (onBridge && obj.userData.bridgeRailing) {
-                    const pushX = BRIDGE_CENTER_X - person.pos.x;
-                    if (Math.abs(pushX) > 1e-6) {
-                        _physicsAvoid.set(Math.sign(pushX), 0, 0).multiplyScalar(0.6);
-                        _physicsForce.add(_physicsAvoid);
-                    }
-                } else {
-                    getClosestPointOnBoxSurface(box, person.pos, _physicsClampedPoint);
-                    _physicsAvoid.subVectors(person.pos, _physicsClampedPoint).normalize().multiplyScalar(obj.userData.isBoundaryObstacle ? 0.75 : PERSON_ENV_INSIDE_STRENGTH);
-                    _physicsForce.add(_physicsAvoid);
-                }
-            } else if (!(onBridge && obj.userData.bridgeRailing)) {
-                // On bridge, skip near-margin repulsion for railings so characters flow along the deck
-                box.clampPoint(person.pos, _physicsClampedPoint);
-                const distEnv = person.pos.distanceTo(_physicsClampedPoint);
-                if (distEnv < margin && distEnv > 0.001) {
-                    // Soft margin repulsion only - compression triggered only on actual collision (fence ray-reject)
-                    _physicsAvoid.subVectors(person.pos, _physicsClampedPoint)
-                        .normalize()
-                        .multiplyScalar((margin - distEnv) * strength);
-                    _physicsForce.add(_physicsAvoid);
-                }
-            }
-        }*/
 
-        // Boundary containment: steer toward walkable when off walkable regions
-        const surfaceInfo = walkableSampler.getSurfaceInfo(person.pos.x, person.pos.z);
-        const nearest = walkableSampler.getNearestWalkable(person.pos.x, person.pos.z);
-        if (!surfaceInfo.inside) {
-            const dx = nearest.x - person.pos.x, dz = nearest.z - person.pos.z;
-            const lenSq = dx * dx + dz * dz;
-            if (lenSq > 1e-10) {
-                const inwardLen = Math.sqrt(lenSq);
-                const tx = nearest.x + (dx / inwardLen) * BOUNDARY_PUSH_INWARD;
-                const tz = nearest.z + (dz / inwardLen) * BOUNDARY_PUSH_INWARD;
-                _physicsBoundarySteer.set(tx - person.pos.x, 0, tz - person.pos.z);
-                _physicsBoundarySteer.normalize().multiplyScalar(MAX_FORCE * 0.5);
-                _physicsForce.add(_physicsBoundarySteer);
-            }
-        } else {
-            const probeDist = 2.5;
-            const px = person.pos.x, pz = person.pos.z;
-            const probes = [
-                [px + probeDist, pz], [px - probeDist, pz], [px, pz + probeDist], [px, pz - probeDist]
-            ];
-            let bestDistSq = Infinity;
-            let boundaryX = px, boundaryZ = pz;
-            for (let i = 0; i < probes.length; i++) {
-                const [qx, qz] = probes[i];
-                if (walkableSampler.getSurfaceInfo(qx, qz).inside) continue;
-                const n = walkableSampler.getNearestWalkable(qx, qz);
-                const dpx = px - n.x, dpz = pz - n.z;
-                const distSq = dpx * dpx + dpz * dpz;
-                if (distSq < bestDistSq && distSq > 1e-10) {
-                    bestDistSq = distSq;
-                    boundaryX = n.x;
-                    boundaryZ = n.z;
-                }
-            }
-            if (bestDistSq < Infinity) {
-                const distToEdge = Math.sqrt(bestDistSq);
-                if (distToEdge < BOUNDARY_SOFT_MARGIN) {
-                    const t = 1 - distToEdge / BOUNDARY_SOFT_MARGIN;
-                    const dx = px - boundaryX, dz = pz - boundaryZ;
-                    const inwardLen = Math.sqrt(dx * dx + dz * dz);
-                    const targetX = boundaryX + (dx / inwardLen) * BOUNDARY_PUSH_INWARD;
-                    const targetZ = boundaryZ + (dz / inwardLen) * BOUNDARY_PUSH_INWARD;
-                    _physicsBoundarySteer.set(targetX - px, 0, targetZ - pz);
-                    _physicsBoundarySteer.normalize().multiplyScalar(MAX_FORCE * 0.4 * t);
-                    _physicsForce.add(_physicsBoundarySteer);
+            // If person is inside the bounding box, push them away
+            if (box.containsPoint(person.pos)) {
+                // Get the closest point on the box surface to the person's position
+                const closestPoint = getClosestPointOnBoxSurface(box, person.pos, _physicsClampedPoint);
+
+                // Calculate direction from person to closest surface point (away from object)
+                // Reuse _physicsPush as temporary vector for avoid direction
+                _physicsPush.subVectors(closestPoint, person.pos);
+                const penetrationDepth = _physicsPush.length();
+
+                if (penetrationDepth > 1e-6) {
+                    // Normalize direction
+                    _physicsPush.normalize();
+
+                    // Calculate force strength: stronger when closer to object center
+                    // The closer the person is to obj.position, the stronger the push needed
+                    const distToCenter = obj.position.distanceTo(person.pos);
+                    const boxSize = box.max.distanceTo(box.min);
+                    const normalizedDist = Math.max(0.1, distToCenter / (boxSize * 0.5)); // Normalize to 0-1 range
+
+                    // Force increases as person gets closer to center (smaller normalizedDist)
+                    // Also increases with penetration depth - deeper penetration = stronger push
+                    const forceStrength = PERSON_ENV_INSIDE_STRENGTH * (1.0 / normalizedDist) * (1.0 + penetrationDepth);
+                    _physicsPush.multiplyScalar(forceStrength);
+
+                    // Accumulate avoid force from this object
+                    _physicsAvoid.add(_physicsPush);
+                } else {
+                    // Fallback: push away from object center if surface point calculation fails
+                    _physicsPush.subVectors(person.pos, obj.position);
+                    const distToCenter = _physicsPush.length();
+                    if (distToCenter > 1e-6) {
+                        _physicsPush.normalize();
+                        // Stronger force when closer to center
+                        const forceStrength = PERSON_ENV_INSIDE_STRENGTH * (1.0 / Math.max(0.1, distToCenter));
+                        _physicsPush.multiplyScalar(forceStrength);
+                        _physicsAvoid.add(_physicsPush);
+                    }
                 }
             }
         }
+        if (_physicsAvoid.lengthSq() > 0) {
+            _physicsForce.add(_physicsAvoid);
+        }
 
-        // Goal Seeking
+        const boundaryInfo = peopleQuadtree.getBoundaryInfo(person.pos.x, person.pos.z);
+        if (!boundaryInfo.outside) {
+            const distToEdge = boundaryInfo.distanceToEdge;
+            const range = PARAMS.boundary.repellantRange;
+            if (distToEdge < range && distToEdge > 0) {
+
+                _physicsForce.add(person.pos.clone().multiplyScalar(-0.02)); // boundary
+            }
+        }
+
         if (person.target) {
             _physicsDestination.subVectors(person.target, person.pos);
             const dist = _physicsDestination.length();
@@ -1975,23 +1839,7 @@ function applyPhysics(person) {
             _physicsClampResult.subVectors(_physicsDestination, person.vel).clampLength(0, MAX_FORCE);
             _physicsForce.add(_physicsClampResult);
         } else if (person.state === 'WANDER') {
-            if (onBridge) {
-                // Flow along bridge (Z): pick a direction once, then bias velocity along bridge axis
-                if (person._bridgeFlowDir === undefined) person._bridgeFlowDir = Math.random() < 0.5 ? 1 : -1;
-                const flowStrength = MAX_FORCE * 0.6;
-                _physicsWanderVec.set((Math.random() - 0.5) * 0.03, 0, person._bridgeFlowDir * (0.7 + Math.random() * 0.3)).normalize().multiplyScalar(flowStrength);
-            } else {
-                if (person._bridgeFlowDir !== undefined) delete person._bridgeFlowDir;
-                // Persistent wander direction (Reynolds-style): change direction gradually every 60-120 frames
-                if (person._wanderChangeAt === undefined || frameCount >= person._wanderChangeAt) {
-                    person._wanderAngle = (person._wanderAngle ?? Math.random() * Math.PI * 2) + (Math.random() - 0.5) * 0.8;
-                    person._wanderChangeAt = frameCount + WANDER_CHANGE_INTERVAL_MIN + Math.floor(Math.random() * (WANDER_CHANGE_INTERVAL_MAX - WANDER_CHANGE_INTERVAL_MIN));
-                }
-                _physicsWanderVec.set(Math.sin(person._wanderAngle), 0, Math.cos(person._wanderAngle)).multiplyScalar(MAX_FORCE * 0.8);
-            }
-            if (person.pos.length() > 120) {
-                _physicsWanderVec.add(person.pos.clone().multiplyScalar(-0.02)); // boundary
-            }
+            _physicsWanderVec.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize().multiplyScalar(MAX_FORCE * 0.8);
             _physicsForce.add(_physicsWanderVec);
         }
     }
@@ -2012,20 +1860,51 @@ function applyPhysics(person) {
     person.pos.add(person.vel);
     person.acc.set(0, 0, 0);
 
-    // Hard-clamp to walkable: if off walkable, snap to nearest; set Y from surface height
-    const afterInfo = walkableSampler.getSurfaceInfo(person.pos.x, person.pos.z);
-    if (!afterInfo.inside) {
-        const nearest = walkableSampler.getNearestWalkable(person.pos.x, person.pos.z);
+    if (!peopleQuadtree.containsPoint(person.pos.x, person.pos.z)) {
+        const nearest = peopleQuadtree.getNearestPointOnBoundary(person.pos.x, person.pos.z);
         person.pos.x = nearest.x;
         person.pos.z = nearest.z;
-        person.pos.y = nearest.y;
+        const surfaceAtBoundary = walkableSampler.getSurfaceInfo(nearest.x, nearest.z);
+        person.pos.y = (surfaceAtBoundary.inside && surfaceAtBoundary.y != null)
+            ? surfaceAtBoundary.y
+            : walkableSampler.getNearestWalkable(nearest.x, nearest.z).y;
+        const clampBoundaryInfo = peopleQuadtree.getBoundaryInfo(person.pos.x, person.pos.z);
+        const vOut = person.vel.x * clampBoundaryInfo.outwardNormalX + person.vel.z * clampBoundaryInfo.outwardNormalZ;
+        if (vOut > 0) {
+            person.vel.x -= vOut * clampBoundaryInfo.outwardNormalX;
+            person.vel.z -= vOut * clampBoundaryInfo.outwardNormalZ;
+        }
     } else {
+        const afterInfo = walkableSampler.getSurfaceInfo(person.pos.x, person.pos.z);
         person.pos.y = afterInfo.y != null ? afterInfo.y : 0;
+    }
+
+    // Hard-clamp: if inside any environment object, snap to its surface and zero outward velocity (same logic as quadtree boundary)
+    const MAX_ENV_CLAMP_ITER = 5;
+    for (let iter = 0; iter < MAX_ENV_CLAMP_ITER; iter++) {
+        let insideAny = false;
+        for (let e = 0; e < environmentObjects.length; e++) {
+            const box = environmentObjects[e].userData.boundingBox;
+            if (!box || !box.containsPoint(person.pos)) continue;
+            insideAny = true;
+            getClosestPointOnBoxSurfaceWithNormal(box, person.pos, _envClampPoint, _envClampNormal);
+            person.pos.copy(_envClampPoint);
+            const surf = walkableSampler.getSurfaceInfo(person.pos.x, person.pos.z);
+            person.pos.y = (surf.inside && surf.y != null) ? surf.y : walkableSampler.getNearestWalkable(person.pos.x, person.pos.z).y;
+            const vOut = person.vel.x * _envClampNormal.x + person.vel.y * _envClampNormal.y + person.vel.z * _envClampNormal.z;
+            if (vOut > 0) {
+                person.vel.x -= vOut * _envClampNormal.x;
+                person.vel.y -= vOut * _envClampNormal.y;
+                person.vel.z -= vOut * _envClampNormal.z;
+            }
+            person.vel.multiplyScalar(0.3);
+            break;
+        }
+        if (!insideAny) break;
     }
 
     person._displacement = Math.hypot(person.pos.x - oldPosX, person.pos.z - oldPosZ);
 
-    // Debug logging for person movement (to diagnose boundary issues)
     if (debugParams.logPersonMovement && people.indexOf(person) === debugParams.debugPersonIndex) {
         const surfaceInfo = person._surfaceCache || {};
         const u = surfaceInfo.u !== undefined ? surfaceInfo.u.toFixed(4) : 'N/A';
@@ -2103,7 +1982,6 @@ function applyDragonflyPhysics(dragonfly) {
         }
     }
 
-    // Boundary containment: force toward center when near any face (like person WANDER)
     const bounds = WALKABLE_WORLD_BOUNDS;
     const margin = 5;
     const BOUNDARY_STRENGTH = 0.02;
@@ -2222,10 +2100,8 @@ function animatePerson(person) {
         return;
     }
     // Position is interpolated in the render pass for smooth movement; rotation/anim here
-    
-        // ========================================================================
+
     // Q3b: PROCEDURAL KINEMATICS - Velocity-Based Transforms & Compression
-    // ========================================================================
     // Procedural animation: banking turns (bankAngle from turn rate), compression
     // on impact (squash/stretch when colliding), velocity-based facing direction.
     // No pre-baked animation clips - all transforms computed procedurally from state.
@@ -2266,7 +2142,7 @@ function animatePerson(person) {
         }
         const ang = Math.atan2(person._smoothedVel.x, person._smoothedVel.z);
         _animatePersonQuat.setFromAxisAngle(_animatePersonAxisY, ang);
-        person.mesh.quaternion.slerp(_animatePersonQuat, 0.15);
+        person.mesh.quaternion.slerp(_animatePersonQuat, 0.35);
         if (snapTimer < SNAP_ARM_UP_DURATION) {
             const u = snapTimer / SNAP_ARM_UP_DURATION;
             person.parts.armRight.rotation.x = SNAP_ARM_UP_ANGLE * u;
@@ -2303,8 +2179,8 @@ function animatePerson(person) {
         person.facingAngle += clampedTurn;
         const ang = person.facingAngle;
         _animatePersonQuat.setFromAxisAngle(_animatePersonAxisY, ang);
-        person.mesh.quaternion.slerp(_animatePersonQuat, 0.15);
-        
+        person.mesh.quaternion.slerp(_animatePersonQuat, 0.35);
+
         // Walk phase tied to displacement (faster movement = faster leg cycle)
         person._walkPhase = (person._walkPhase ?? 0) + (person._displacement ?? 0) * WALK_PHASE_PER_UNIT;
         const t = person._walkPhase;
@@ -2327,19 +2203,21 @@ const DUNELM_QUEUE_TARGET = new THREE.Vector3(-5.75, 0, -32.2);
 const DUNELM_DOOR_OPEN_RADIUS = 2;
 const DUNELM_INSIDE_MIN_FRAMES = 90;
 const DUNELM_INSIDE_MAX_FRAMES = 210;
-const _doorQueryBox = new THREE.Box3().setFromCenterAndSize(
-    DUNELM_QUEUE_TARGET.clone(),
-    new THREE.Vector3(DUNELM_DOOR_OPEN_RADIUS * 2 + 2, 6, DUNELM_DOOR_OPEN_RADIUS * 2 + 2)
-);
+const _doorBox2D = {
+    minX: DUNELM_QUEUE_TARGET.x - (DUNELM_DOOR_OPEN_RADIUS + 1),
+    maxX: DUNELM_QUEUE_TARGET.x + (DUNELM_DOOR_OPEN_RADIUS + 1),
+    minZ: DUNELM_QUEUE_TARGET.z - (DUNELM_DOOR_OPEN_RADIUS + 1),
+    maxZ: DUNELM_QUEUE_TARGET.z + (DUNELM_DOOR_OPEN_RADIUS + 1)
+};
 const _doorNeighbors = [];
 
 function updateDecision(person) {
     // SNAPPING -> WANDER is handled in applyPhysics (velocity + lastSnapFrame set there)
-    
+
     // Bridge navigation: when on bridge, set target to far end
     const onBridge = person._surfaceCache && person._surfaceCache.regionIndex === BRIDGE_DECK_REGION_INDEX;
     const wasOnBridge = person._wasOnBridge === true;
-    
+
     if (onBridge && !wasOnBridge && person.state === "WANDER") {
         // Just stepped onto bridge - set target to far end
         person.target = BRIDGE_FAR_TARGET.clone();
@@ -2353,7 +2231,7 @@ function updateDecision(person) {
     } else if (onBridge) {
         person._wasOnBridge = true;
     }
-    
+
     if (person.state === "WANDER") {
         if (Math.random() < 0.0001) {
             const framesSinceSnap = frameCount - (person.lastSnapFrame ?? -SEEK_LILY_COOLDOWN_FRAMES);
@@ -2403,21 +2281,23 @@ function animate() {
         treeElement.update(camera);
     }
 
-    let _t0;
-    if (ENABLE_PROFILING) _t0 = performance.now();
-
-    // Update person bounds; incremental octree update every 4 frames to save compute
+    // Update person bounds2D; incremental quadtree update every 4 frames to save compute
     if (frameCount % 4 === 0) {
-        const OCTREE_MOVE_EPS_SQ = 1e-6;
+        const QUADTREE_MOVE_EPS_SQ = 1e-6;
         for (let i = 0; i < people.length; i++) {
             const person = people[i];
             if (person.state === "INSIDE") continue;
-            person.bounds.min.set(person.pos.x - PERSON_RADIUS, person.pos.y, person.pos.z - PERSON_RADIUS);
-            person.bounds.max.set(person.pos.x + PERSON_RADIUS, person.pos.y + CHARACTER_HEIGHT, person.pos.z + PERSON_RADIUS);
-            if (person.pos.distanceToSquared(person._lastOctreePos) > OCTREE_MOVE_EPS_SQ) {
-                octree.remove(person);
-                octree.insert(person);
-                person._lastOctreePos.copy(person.pos);
+            person.bounds2D.minX = person.pos.x - PERSON_RADIUS;
+            person.bounds2D.maxX = person.pos.x + PERSON_RADIUS;
+            person.bounds2D.minZ = person.pos.z - PERSON_RADIUS;
+            person.bounds2D.maxZ = person.pos.z + PERSON_RADIUS;
+            const dx = person.pos.x - person._lastQuadtreePos.x;
+            const dz = person.pos.z - person._lastQuadtreePos.z;
+            if (dx * dx + dz * dz > QUADTREE_MOVE_EPS_SQ) {
+                peopleQuadtree.remove(person);
+                peopleQuadtree.insert(person);
+                person._lastQuadtreePos.x = person.pos.x;
+                person._lastQuadtreePos.z = person.pos.z;
             }
         }
     }
@@ -2437,12 +2317,12 @@ function animate() {
         let someoneNearDoor = false;
 
         if (doorGroup) {
-            const nearDoor = octree.queryBounds(_doorQueryBox, _doorNeighbors);
+            const nearDoor = peopleQuadtree.queryBounds(_doorBox2D, _doorNeighbors);
             for (let i = 0; i < nearDoor.length; i++) {
                 const person = nearDoor[i];
-                    if (person.state === "QUEUING" && person.target != null && person.target.distanceToSquared(DUNELM_QUEUE_TARGET) < 0.1 && person.pos.distanceTo(DUNELM_QUEUE_TARGET) < DUNELM_DOOR_OPEN_RADIUS) {
+                if (person.state === "QUEUING" && person.target != null && person.target.distanceToSquared(DUNELM_QUEUE_TARGET) < 0.1 && person.pos.distanceTo(DUNELM_QUEUE_TARGET) < DUNELM_DOOR_OPEN_RADIUS) {
                     someoneNearDoor = true;
-                    octree.remove(person);
+                    peopleQuadtree.remove(person);
                     person.state = "INSIDE";
                     peopleInsideCount++;
                     person.respawnAt = frameCount + DUNELM_INSIDE_MIN_FRAMES + Math.floor(Math.random() * (DUNELM_INSIDE_MAX_FRAMES - DUNELM_INSIDE_MIN_FRAMES));
@@ -2459,7 +2339,7 @@ function animate() {
                 doorGroup.rotation.y += (0 - doorGroup.rotation.y) * 0.1;
             }
 
-            // Respawn INSIDE people when time is up (must iterate people: INSIDE are not in octree)
+            // Respawn INSIDE people when time is up (must iterate people: INSIDE are not in quadtree)
             const doorWorldPos = dunelm.userData.doorWorldPosition;
             const doorExitDir = dunelm.userData.doorExitDirection;
             for (let i = 0; i < people.length; i++) {
@@ -2469,12 +2349,108 @@ function animate() {
                     person.pos.copy(doorWorldPos).addScaledVector(doorExitDir, 1.0);
                     person.vel.copy(doorExitDir).multiplyScalar(person.maxSpeed * 0.5);
                     person.facingAngle = Math.atan2(doorExitDir.x, doorExitDir.z);
-                    person._lastOctreePos.copy(person.pos);
-                    octree.insert(person);
+                    person.bounds2D = {
+                        minX: person.pos.x - PERSON_RADIUS,
+                        maxX: person.pos.x + PERSON_RADIUS,
+                        minZ: person.pos.z - PERSON_RADIUS,
+                        maxZ: person.pos.z + PERSON_RADIUS
+                    };
+                    person._lastQuadtreePos = { x: person.pos.x, z: person.pos.z };
+                    peopleQuadtree.insert(person);
                     person.state = "WANDER";
                     person.target = null;
                     delete person.respawnAt;
                 }
+            }
+        }
+
+        // Hybrid crowd: bucket by distance; characters beyond CULL_DISTANCE are not rendered; INSIDE are hidden
+        _listClose.length = 0;
+        _listMid.length = 0;
+        for (let i = 0; i < people.length; i++) {
+            const person = people[i];
+            if (person.state === "INSIDE") {
+                if (person.mesh) {
+                    if (person.mesh.parent) person.mesh.parent.remove(person.mesh);
+                    person.mesh = null;
+                    person.parts = null;
+                    person._phone = null;
+                    person.getPhone = () => null;
+                    person.triggerFlash = () => { };
+                }
+                continue;
+            }
+            const dist = person.pos.distanceTo(camPos);
+            if (dist > CULL_DISTANCE) {
+                // Culled: remove mesh if they had one (e.g. just moved out of range)
+                if (person.mesh) {
+                    if (person.mesh.parent) person.mesh.parent.remove(person.mesh);
+                    person.mesh = null;
+                    person.parts = null;
+                    person._phone = null;
+                    person.getPhone = () => null;
+                    person.triggerFlash = () => { };
+                }
+                continue;
+            }
+            // Q4a: LOD hysteresis to prevent popping - use different thresholds for promote vs demote
+            const wasClose = person.mesh !== null;  // Currently has close LOD mesh
+            if (wasClose) {
+                // Demote only if beyond demote threshold
+                if (dist < LOD_CLOSE_DEMOTE) _listClose.push(person);
+                else _listMid.push(person);
+            } else {
+                // Promote only if within promote threshold
+                if (dist < LOD_CLOSE_PROMOTE) _listClose.push(person);
+                else _listMid.push(person);
+            }
+        }
+
+        // Demote: remove mesh from people in mid tier; keep visual continuity by seeding _displayPos from mesh position
+        for (let i = 0; i < _listMid.length; i++) {
+            const p = _listMid[i];
+            if (p.mesh) {
+                p._displayPos = p.mesh.position.clone();
+                if (p.mesh.parent) p.mesh.parent.remove(p.mesh);
+                p.mesh = null;
+                p.parts = null;
+                p._phone = null;
+                p.getPhone = () => null;
+                p.triggerFlash = () => { };
+            }
+        }
+
+        // Promote: create mesh for people in close tier; start at _displayPos so no jump from instanced position
+        for (let i = 0; i < _listClose.length; i++) {
+            const p = _listClose[i];
+            if (!p.mesh) {
+                const startPos = (p._displayPos != null) ? p._displayPos.clone() : p.pos.clone();
+                const { mesh, parts, _phone } = createPersonMeshOnly({ position: startPos, rotationY: p.facingAngle });
+                p.mesh = mesh;
+                p.parts = parts;
+                p._phone = _phone;
+                p.getPhone = function () { return this._phone || null; };
+                p.triggerFlash = function () {
+                    const phone = this.getPhone();
+                    if (phone) {
+                        phone.setFlashOn();
+                        setTimeout(() => phone.setFlashOff(), 500);
+                    }
+                };
+                scene.add(p.mesh);
+            }
+        }
+
+        // Only characters within SHADOW_DISTANCE of camera cast shadows; only traverse when state changes
+        for (let i = 0; i < _listClose.length; i++) {
+            const p = _listClose[i];
+            if (p.mesh) {
+                const inRange = p.pos.distanceTo(camPos) < SHADOW_DISTANCE;
+                if (p._castShadow !== inRange) {
+                    p._castShadow = inRange;
+                    p.mesh.traverse((o) => { if (o.isMesh) o.castShadow = inRange; });
+                }
+                p.mesh.position.lerp(p.pos, PERSON_POS_INTERP);
             }
         }
     }
@@ -2537,101 +2513,6 @@ function animate() {
             const dragonfly = dragonflies[i];
             dragonfly.path = findPathOctree(dragonflyOctree, dragonfly.pos, cursorWorldPos, isLeafBlocked);
             dragonfly.pathIndex = 0;
-        }
-    }
-
-    if (ENABLE_PROFILING) {
-        _profileCrowdMs = performance.now() - _t0;
-        _t0 = performance.now();
-    }
-
-    // Hybrid crowd: bucket by distance; characters beyond CULL_DISTANCE are not rendered; INSIDE are hidden
-    _listClose.length = 0;
-    _listMid.length = 0;
-    for (let i = 0; i < people.length; i++) {
-        const person = people[i];
-        if (person.state === "INSIDE") {
-            if (person.mesh) {
-                if (person.mesh.parent) person.mesh.parent.remove(person.mesh);
-                person.mesh = null;
-                person.parts = null;
-                person._phone = null;
-                person.getPhone = () => null;
-                person.triggerFlash = () => { };
-            }
-            continue;
-        }
-        const dist = person.pos.distanceTo(camPos);
-        if (dist > CULL_DISTANCE) {
-            // Culled: remove mesh if they had one (e.g. just moved out of range)
-            if (person.mesh) {
-                if (person.mesh.parent) person.mesh.parent.remove(person.mesh);
-                person.mesh = null;
-                person.parts = null;
-                person._phone = null;
-                person.getPhone = () => null;
-                person.triggerFlash = () => { };
-            }
-            continue;
-        }
-        // Q4a: LOD hysteresis to prevent popping - use different thresholds for promote vs demote
-        const wasClose = person.mesh !== null;  // Currently has close LOD mesh
-        if (wasClose) {
-            // Demote only if beyond demote threshold
-            if (dist < LOD_CLOSE_DEMOTE) _listClose.push(person);
-            else _listMid.push(person);
-        } else {
-            // Promote only if within promote threshold
-            if (dist < LOD_CLOSE_PROMOTE) _listClose.push(person);
-            else _listMid.push(person);
-        }
-    }
-
-    // Demote: remove mesh from people in mid tier; keep visual continuity by seeding _displayPos from mesh position
-    for (let i = 0; i < _listMid.length; i++) {
-        const p = _listMid[i];
-        if (p.mesh) {
-            p._displayPos = p.mesh.position.clone();
-            if (p.mesh.parent) p.mesh.parent.remove(p.mesh);
-            p.mesh = null;
-            p.parts = null;
-            p._phone = null;
-            p.getPhone = () => null;
-            p.triggerFlash = () => { };
-        }
-    }
-
-    // Promote: create mesh for people in close tier; start at _displayPos so no jump from instanced position
-    for (let i = 0; i < _listClose.length; i++) {
-        const p = _listClose[i];
-        if (!p.mesh) {
-            const startPos = (p._displayPos != null) ? p._displayPos.clone() : p.pos.clone();
-            const { mesh, parts, _phone } = createPersonMeshOnly({ position: startPos, rotationY: p.facingAngle });
-            p.mesh = mesh;
-            p.parts = parts;
-            p._phone = _phone;
-            p.getPhone = function () { return this._phone || null; };
-            p.triggerFlash = function () {
-                const phone = this.getPhone();
-                if (phone) {
-                    phone.setFlashOn();
-                    setTimeout(() => phone.setFlashOff(), 500);
-                }
-            };
-            scene.add(p.mesh);
-        }
-    }
-
-    // Only characters within SHADOW_DISTANCE of camera cast shadows; only traverse when state changes
-    for (let i = 0; i < _listClose.length; i++) {
-        const p = _listClose[i];
-        if (p.mesh) {
-            const inRange = p.pos.distanceTo(camPos) < SHADOW_DISTANCE;
-            if (p._castShadow !== inRange) {
-                p._castShadow = inRange;
-                p.mesh.traverse((o) => { if (o.isMesh) o.castShadow = inRange; });
-            }
-            p.mesh.position.lerp(p.pos, PERSON_POS_INTERP);
         }
     }
 
@@ -2752,7 +2633,7 @@ function animate() {
             const vNorm = zLocal / WAVE_PLANE_SIZE;
             getBSplineSurfaceWorldPointAtNormalized(wavePlaneGroup, wavePlaneControlPoints, uNorm, vNorm, _wavePlaneEvalWorldPos);
             mesh.position.copy(_wavePlaneEvalWorldPos);
-            
+
             // LOD switching: use low-LOD geometry when far from camera
             const distToCam = mesh.position.distanceTo(camPos);
             const shouldUseLowLOD = distToCam > WAVE_PLANE_LIGHT_LOD_DISTANCE;
@@ -2786,14 +2667,7 @@ function animate() {
     } else {
         renderer.render(scene, camera);
     }
-    if (ENABLE_PROFILING) {
-        const now = performance.now();
-        const renderMs = now - _t0;
-        if (now - _profileLastLog >= 1000) {
-            console.log(`[perf] crowd: ${_profileCrowdMs.toFixed(2)}ms, bucket: ${_profileBucketMs.toFixed(2)}ms, composer: ${renderMs.toFixed(2)}ms, drawCalls: ${renderer.info.render.calls}`);
-            _profileLastLog = now;
-        }
-    }
+
     stats.update();
 }
 
